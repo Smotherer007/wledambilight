@@ -1,6 +1,6 @@
 [package]
 name = "wled-ambilight"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.90"
 description = "Lightweight ambilight: captures the screen, samples freely placed zones and streams the colours to WLED, OpenRGB, Razer Chroma, Govee and Nanoleaf."

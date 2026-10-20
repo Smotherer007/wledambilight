@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/Smotherer007/wledambilight/compare/v0.2.0...v0.3.0) (2026-10-20)
+
+
+### Features
+
+* OpenRGB, Razer Chroma, Govee and Nanoleaf as further device types ([0f89d59](https://github.com/Smotherer007/wledambilight/commit/0f89d595458e286490e2011214824d30eb369b26))
+
 ## [0.2.0](https://github.com/Smotherer007/wledambilight/compare/v0.1.0...v0.2.0) (2026-10-20)
 
 

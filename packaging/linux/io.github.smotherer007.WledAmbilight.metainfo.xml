@@ -75,7 +75,7 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="0.2.0" date="2026-10-20"><!-- x-release-please-version -->
+    <release version="0.3.0" date="2026-10-20"><!-- x-release-please-version -->
       <description>
         <p>First public release: Linux, Windows and macOS.</p>
       </description>
