@@ -829,16 +829,16 @@ fn status_text(s: &CaptureStatus) -> (String, Color32) {
 // ------------------------------------------------------------------ panels
 
 impl App {
-    fn top_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("top")
-            .exact_height(56.0)
+    fn top_bar(&mut self, root: &mut egui::Ui) {
+        egui::Panel::top("top")
+            .exact_size(56.0)
             .frame(
                 egui::Frame::new()
                     .fill(theme::WALL)
                     .inner_margin(egui::Margin::symmetric(18, 0))
                     .stroke(Stroke::new(1.0_f32, theme::LINE)),
             )
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 ui.horizontal_centered(|ui| {
                     if let Some(logo) = self.logo.as_ref() {
                         ui.add(egui::Image::new((logo.id(), Vec2::splat(26.0))));
@@ -892,11 +892,11 @@ impl App {
             });
     }
 
-    fn devices_panel(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::left("devices")
+    fn devices_panel(&mut self, root: &mut egui::Ui) {
+        egui::Panel::left("devices")
             .resizable(true)
-            .default_width(284.0)
-            .width_range(250.0..=440.0)
+            .default_size(284.0)
+            .size_range(250.0..=440.0)
             .frame(
                 egui::Frame::new()
                     .fill(theme::PANEL)
@@ -907,7 +907,7 @@ impl App {
                         bottom: 12,
                     }),
             )
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
                     theme::title(ui, tr("Geräte", "Devices"));
                     if !self.cfg.devices.is_empty() {
@@ -1270,11 +1270,11 @@ impl App {
         }
     }
 
-    fn inspector(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::right("inspector")
+    fn inspector(&mut self, root: &mut egui::Ui) {
+        egui::Panel::right("inspector")
             .resizable(true)
-            .default_width(312.0)
-            .width_range(280.0..=460.0)
+            .default_size(312.0)
+            .size_range(280.0..=460.0)
             .frame(
                 egui::Frame::new()
                     .fill(theme::PANEL)
@@ -1285,7 +1285,7 @@ impl App {
                         bottom: 12,
                     }),
             )
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 let w = ui.available_width();
                 theme::segmented(
                     ui,
@@ -1426,7 +1426,11 @@ impl App {
                     });
                 })
                 .response;
-            let click = ui.interact(resp.rect, ui.id().with(("zone-row", i)), Sense::click());
+            let click = ui.interact(
+                resp.rect,
+                ui.scope_id().with(("zone-row", i)),
+                Sense::click(),
+            );
             if click.clicked() {
                 self.selected = Some(i);
             }
@@ -1916,7 +1920,7 @@ impl App {
         }
     }
 
-    fn output_bar(&mut self, ctx: &egui::Context) {
+    fn output_bar(&mut self, root: &mut egui::Ui) {
         let devices: Vec<(usize, String, bool)> = self
             .cfg
             .devices
@@ -1925,7 +1929,7 @@ impl App {
             .filter(|(_, d)| d.enabled)
             .map(|(i, d)| (i, d.name.clone(), d.bgr))
             .collect();
-        egui::TopBottomPanel::bottom("output")
+        egui::Panel::bottom("output")
             .resizable(false)
             .frame(
                 egui::Frame::new()
@@ -1933,7 +1937,7 @@ impl App {
                     .inner_margin(egui::Margin::symmetric(18, 12))
                     .stroke(Stroke::new(1.0_f32, theme::LINE)),
             )
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 ui.horizontal(|ui| {
                     theme::title(ui, tr("Ausgabe", "Output"));
                     if let Some((text, at)) = self.notice.as_ref() {
@@ -1982,14 +1986,14 @@ impl App {
             });
     }
 
-    fn canvas(&mut self, ctx: &egui::Context, live: bool) {
+    fn canvas(&mut self, root: &mut egui::Ui, live: bool) {
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(theme::WALL)
                     .inner_margin(egui::Margin::same(20)),
             )
-            .show(ctx, |ui| {
+            .show(root, |ui| {
                 if live || self.texture.is_none() {
                     self.update_texture(ui.ctx());
                 }
@@ -2389,7 +2393,8 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = &root.ctx().clone();
         let focused = ctx.input(|i| i.focused);
         // Linux: freeze what the window shows while it is in the background
         let live = capture::EXCLUDES_OWN_WINDOW || focused || capture::demo_mode();
@@ -2464,11 +2469,11 @@ impl eframe::App for App {
         }
 
         self.keyboard(ctx);
-        self.top_bar(ctx);
-        self.output_bar(ctx);
-        self.devices_panel(ctx);
-        self.inspector(ctx);
-        self.canvas(ctx, live);
+        self.top_bar(root);
+        self.output_bar(root);
+        self.devices_panel(root);
+        self.inspector(root);
+        self.canvas(root, live);
 
         if self.pushed != self.cfg {
             self.changed();
@@ -2485,7 +2490,7 @@ impl eframe::App for App {
         theme::WALL.to_normalized_gamma_f32()
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         self.cfg.save();
     }
 }

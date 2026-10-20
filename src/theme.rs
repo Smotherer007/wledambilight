@@ -89,7 +89,7 @@ pub fn install(ctx: &egui::Context) {
     install_fonts(ctx);
     ctx.set_theme(egui::Theme::Dark);
 
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
     let mut v = egui::Visuals::dark();
     v.panel_fill = WALL;
     v.window_fill = PANEL;
@@ -177,7 +177,7 @@ pub fn install(ctx: &egui::Context) {
     ]
     .into();
     style.interaction.tooltip_delay = 0.35;
-    ctx.set_style(style);
+    ctx.set_style_of(egui::Theme::Dark, style);
 }
 
 // ------------------------------------------------------------------ text
@@ -338,7 +338,7 @@ pub fn segmented<T: PartialEq + Copy>(
         let resp = ui
             .interact(
                 r,
-                ui.id()
+                ui.scope_id()
                     .with(("seg", i, rect.left() as i32, rect.top() as i32)),
                 Sense::click(),
             )
@@ -399,7 +399,7 @@ pub fn slider_row(
 /// Dropdown with a fixed set of values.
 pub fn combo<T: PartialEq + Copy>(
     ui: &mut Ui,
-    id: impl std::hash::Hash,
+    id: impl egui::AsIdSalt,
     width: f32,
     value: &mut T,
     label: impl Fn(T) -> String,

@@ -15,6 +15,8 @@
 /// Channel order of the 4-byte source pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Order {
+    // macOS always asks ScreenCaptureKit for BGRA; Windows and the tests use both
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Rgba,
     Bgra,
 }
