@@ -7,8 +7,11 @@ updates:
     commit-message:
       prefix: build
     groups:
-      cargo:
-        patterns: ["*"]
+      # small, compatible updates come as one PR ...
+      cargo-patch:
+        update-types: ["patch"]
+    # ... everything else (e.g. egui 0.32 -> 0.37, which breaks the API) gets
+    # its own PR, so a red CI points straight at the crate that needs work
   - package-ecosystem: github-actions
     directory: /
     schedule:
