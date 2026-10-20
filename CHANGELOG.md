@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.2.0](https://github.com/Smotherer007/wledambilight/compare/v0.1.0...v0.2.0) (2026-10-20)
+
+
+### Features
+
+* cross-platform support, new interface and release pipeline ([0cb446d](https://github.com/Smotherer007/wledambilight/commit/0cb446dc9fb86a4364305a3ad990ac8de6c9fb00))
+
+
+### Bug fixes
+
+* DDP test on macOS (connected UDP socket cannot be re-connected) ([be3a98d](https://github.com/Smotherer007/wledambilight/commit/be3a98d1196f2448a61ffbe2545f9227a50c0891))
+
+
+### Refactoring
+
+* adapt to the egui 0.37 API ([9f06516](https://github.com/Smotherer007/wledambilight/commit/9f06516c498798cf3463a4e62ddceec47bd8b34b))
+
+
+### Build and packaging
+
+* bump the cargo group with 3 updates ([4bfa354](https://github.com/Smotherer007/wledambilight/commit/4bfa3547e04e367563bcf1df1795d59d377603d0))
+* bump the cargo group with 3 updates ([4f88bfa](https://github.com/Smotherer007/wledambilight/commit/4f88bfa5c223edac071f3f9641676a44da33baeb))
+* link the Swift runtime rpath on macOS ([8ddfcb6](https://github.com/Smotherer007/wledambilight/commit/8ddfcb60730a2cef9d3eb033ca90e703c886353a))
+
+## Changelog
+
 All notable changes are listed here. New entries are added above by
 [release-please](https://github.com/googleapis/release-please) from the
 commit messages (see [CONTRIBUTING.md](CONTRIBUTING.md)).
