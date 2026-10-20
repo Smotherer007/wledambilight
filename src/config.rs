@@ -23,14 +23,55 @@ pub enum Protocol {
     Drgb,
 }
 
+/// What kind of device a [`DeviceCfg`] talks to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DeviceKind {
+    /// WLED over DDP or DRGB
+    #[default]
+    Wled,
+    /// one controller of an OpenRGB SDK server (PC peripherals, RAM, fans, …)
+    OpenRgb,
+    /// Razer Chroma via the local REST API of Razer Synapse (Windows)
+    Razer,
+    /// Govee LAN device in realtime ("razer"/DreamView) mode
+    Govee,
+    /// Nanoleaf panels via External Control v2
+    Nanoleaf,
+}
+
+impl DeviceKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            DeviceKind::Wled => "WLED",
+            DeviceKind::OpenRgb => "OpenRGB",
+            DeviceKind::Razer => "Razer Chroma",
+            DeviceKind::Govee => "Govee",
+            DeviceKind::Nanoleaf => "Nanoleaf",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceCfg {
     pub id: String,
     pub name: String,
     pub host: String,
+    /// LEDs, segments (Govee), panels (Nanoleaf) or columns (Razer)
     pub led_count: u16,
     pub enabled: bool,
+    /// WLED only
     pub protocol: Protocol,
+    #[serde(default)]
+    pub kind: DeviceKind,
+    /// OpenRGB: TCP port of the SDK server (0 = 6742)
+    #[serde(default)]
+    pub port: u16,
+    /// OpenRGB: "controller name@location"; Govee: model (SKU)
+    #[serde(default)]
+    pub target: String,
+    /// Nanoleaf: auth token from pairing
+    #[serde(default)]
+    pub token: Option<String>,
     /// 0..1, scales everything sent to this device
     pub brightness: f32,
     /// physical strip is wired the other way round
@@ -56,7 +97,33 @@ impl DeviceCfg {
             reverse: false,
             bgr: false,
             max_fps: 0,
+            kind: DeviceKind::Wled,
+            port: 0,
+            target: String::new(),
+            token: None,
         }
+    }
+
+    /// A device of another kind. `id` must be unique across all devices.
+    pub fn of_kind(
+        kind: DeviceKind,
+        id: impl Into<String>,
+        host: impl Into<String>,
+        name: impl Into<String>,
+        leds: u16,
+    ) -> Self {
+        let mut d = Self::new(host, name, leds);
+        d.id = id.into();
+        d.kind = kind;
+        d
+    }
+
+    /// Everything that requires a new connection when it changes.
+    pub fn connection_key(&self) -> String {
+        format!(
+            "{:?}|{}|{}|{:?}|{}|{}|{:?}",
+            self.kind, self.host, self.port, self.protocol, self.target, self.led_count, self.token
+        )
     }
 }
 
@@ -314,6 +381,9 @@ mod tests {
         assert!(cfg.devices[0].reverse);
         assert_eq!(cfg.devices[0].max_fps, 0);
         assert_eq!(cfg.settings.language, "auto");
+        // configs from 0.2.0 have no kind: they are WLED devices
+        assert_eq!(cfg.devices[0].kind, DeviceKind::Wled);
+        assert_eq!(cfg.devices[0].token, None);
     }
 
     #[test]

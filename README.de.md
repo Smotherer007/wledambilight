@@ -6,18 +6,22 @@
 
 **English:** [README.md](README.md)
 
-Ein leichtgewichtiges Ambilight für [WLED](https://kno.wled.ge/). Das Programm
-nimmt den Bildschirm auf, mittelt frei platzierbare Zonen und schickt die
-Farben in Echtzeit an ein oder mehrere WLED-Geräte – das Licht hinter Monitor
-oder Fernseher folgt dem Bild. Läuft unter **Linux, Windows und macOS**.
+Ein leichtgewichtiges Ambilight für [WLED](https://kno.wled.ge/) und mehr. Das
+Programm nimmt den Bildschirm auf, mittelt frei platzierbare Zonen und schickt
+die Farben in Echtzeit an WLED-Streifen, PC-Peripherie (über OpenRGB und Razer
+Chroma), Govee-Leuchten und Nanoleaf-Panels – das Licht hinter Monitor oder
+Fernseher und auf dem Schreibtisch folgt dem Bild. Läuft unter **Linux, Windows
+und macOS**, komplett im lokalen Netz: kein Konto, keine Cloud.
 
 ![WLED Ambilight mit vier Kantenzonen und einer freien Zone in der Vorschau](docs/screenshot-de.png)
 
 ## Funktionen
 
-- **Findet Geräte selbst** – per mDNS und Suche im eigenen Subnetz; LED-Anzahl,
-  Name und Firmware kommen aus WLEDs `/json/info`. Geräte in anderen Netzen
-  lassen sich per IP oder Hostname hinzufügen.
+- **Fünf Gerätetypen** – WLED, OpenRGB, Razer Chroma, Govee und Nanoleaf,
+  beliebig gemischt (siehe [Unterstützte Geräte](#unterstützte-geräte)).
+- **Findet Geräte selbst** – eine Suche deckt alle Typen ab (mDNS, Subnetz-Suche,
+  Govee-LAN-Scan, lokales OpenRGB und Synapse). Geräte in anderen Netzen lassen
+  sich per IP oder Hostname hinzufügen.
 - **Zonen statt fester Layouts** – eine Zone ist ein beliebiges Rechteck auf
   dem Bildschirm, das einen Abschnitt eines Streifens steuert. Mit der Maus
   verschieben und skalieren, Einrasten an Kanten und anderen Zonen,
@@ -39,6 +43,59 @@ oder Fernseher folgt dem Bild. Läuft unter **Linux, Windows und macOS**.
 - **Hintergrundbetrieb** – Tray-/Menüleisten-Symbol, Schließen ins Tray,
   `--minimized` für den Autostart, `--headless` für Systeme ohne Desktop.
 - **Deutsche und englische** Oberfläche, richtet sich nach der Systemsprache.
+
+## Unterstützte Geräte
+
+| Gerät | Verbindung | Auflösung | System | Einmalige Einrichtung |
+| --- | --- | --- | --- | --- |
+| **WLED** | DDP (UDP 4048) oder DRGB (UDP 21324) | jede LED | alle | keine |
+| **OpenRGB** – Tastaturen, Mäuse, RAM, Lüfter, Mainboards, Grafikkarten, Streifen fast aller Hersteller | OpenRGB-SDK-Server (TCP 6742) | jede LED | alle | [OpenRGB](https://openrgb.org) starten und den *SDK Server* einschalten |
+| **Razer Chroma** – Razer-Geräte plus *Chroma-Connect*-Partner | REST-API von Razer Synapse auf `localhost` | Spalten links → rechts | Windows | Synapse läuft, *Chroma Apps* an, angemeldet |
+| **Govee** – Streifen, TV-Hintergrundbeleuchtung, Lichtleisten mit LAN-Steuerung | LAN-API (UDP 4001–4003), Echtzeitmodus | Segmente (meist 10–15) | alle | *LAN-Steuerung* für das Gerät in der Govee-Home-App einschalten |
+| **Nanoleaf** – Shapes, Canvas, Elements, Lines, Light Panels | OpenAPI (Port 16021) + External Control v2 (UDP 60222) | jedes Panel | alle | einmal koppeln (Taste am Controller) |
+
+Alles bleibt im lokalen Netz. Kein Gerät braucht ein Konto-Passwort; Nanoleaf
+gibt beim Koppeln einen Schlüssel heraus, der in der Konfigurationsdatei
+gespeichert wird.
+
+**Hinweise je Gerät**
+
+- **OpenRGB** spricht die Hardware direkt an. Läuft gleichzeitig die
+  Hersteller-Software (Corsair iCUE, Razer Synapse, Logitech G Hub …), kämpfen
+  beide um die LEDs – für die Geräte, die über OpenRGB laufen, die
+  Hersteller-Software beenden. Jeder OpenRGB-Controller ist ein eigenes Gerät in
+  der App. OpenRGB auf einem anderen Rechner: *Per Adresse hinzufügen* → OpenRGB
+  → `host:6742`.
+- **Razer Chroma** zeigt immer nur die zuletzt gestartete App. Deshalb ist die
+  gesamte Razer-Hardware ein Gerät in der App: seine „LEDs“ sind Spalten von
+  links nach rechts, verteilt auf Tastatur (22 Spalten), Maus, Mauspad, Headset,
+  Keypad und *Chroma Link* (das auch *Chroma-Connect*-Geräte anderer Hersteller
+  erreicht). Die Zone an die Unterkante des Bildschirms legen ergibt einen
+  Verlauf über den Schreibtisch.
+- **Govee** hat keine offizielle Schnittstelle für einzelne Segmente. Die App
+  nutzt den Echtzeitmodus, den Govees eigene PC-App für die Bildschirm-
+  Synchronisation verwendet (von der Community dokumentiert); die offizielle
+  LAN-API kennt nur eine Farbe pro Gerät. Die Segmentzahl des Modells auf der
+  Gerätekarte einstellen (Anleitung / Govee-App). Windows fragt einmal, ob die
+  App im Netzwerk empfangen darf – das ist die Antwort des Govee-Scans (UDP 4002).
+- **Nanoleaf**-Panels werden von links nach rechts sortiert (bei hohen
+  Anordnungen von oben nach unten). Koppeln: Ein/Aus-Taste am Controller
+  5–7 Sekunden halten, bis die LEDs blinken, dann innerhalb von 30 Sekunden auf
+  der Gerätekarte *Koppeln* klicken.
+
+**Nicht unterstützt, und warum**
+
+- **Corsair iCUE SDK** – technisch machbar, aber das SDK steht unter einer
+  proprietären Corsair-Lizenz, die das Verbinden mit anderer Software untersagt
+  und keine Weitergabe erlaubt. Das ist mit der GPL-3.0 dieser App nicht
+  vereinbar. Corsair-Hardware funktioniert stattdessen über **OpenRGB** (mit
+  geschlossenem iCUE).
+- **Logitech G Hub, SteelSeries GG, ASUS Aura, MSI, Gigabyte** – über OpenRGB,
+  das diese Hardware direkt abdeckt.
+- **Philips Hue, LIFX, Twinkly** – geplant; sie brauchen eine gekoppelte Bridge
+  bzw. herstellerspezifisches Streaming und echte Hardware zum Testen.
+- **Tuya / Smart Life, WiZ, Yeelight, Magic Home** – einfarbige, langsame
+  Protokolle (oder Schlüssel nur über die Cloud), die keinem Bild folgen können.
 
 ## Installation
 
@@ -77,14 +134,15 @@ starten. Ist der Build nicht notarisiert, meldet macOS, die App „kann nicht
 
 1. **WLED vorbereiten.** Jede aktuelle WLED-Version funktioniert direkt:
    Echtzeit-UDP ist standardmäßig an (*Config → Sync Interfaces → Realtime*).
-   LED-Anzahl und Stromlimit (ABL) wie gewohnt dort einstellen.
+   LED-Anzahl und Stromlimit (ABL) wie gewohnt dort einstellen. Andere Geräte:
+   siehe *Einmalige Einrichtung* unter [Unterstützte Geräte](#unterstützte-geräte).
 2. **WLED Ambilight starten.** Das Netzwerk wird automatisch durchsucht; beim
    Gerät auf **+** klicken. Es bekommt eine Zone mit allen LEDs an einer freien
    Bildschirmkante.
 3. **Zonen platzieren.** Für einen Streifen rund um den Bildschirm die Zone
    auswählen und **Auf 4 Kanten** klicken. Richtung prüfen: der kleine Pfeil in
    jeder Zone markiert LED 0. Läuft das Licht falsch herum, beim Gerät
-   **Streifen läuft rückwärts** einschalten.
+   **Reihenfolge umkehren** einschalten.
 4. **Bild abstimmen** im Reiter *Bild*. Alles wird automatisch gespeichert.
 
 ## Begriffe
@@ -97,7 +155,7 @@ starten. Ist der Build nicht notarisiert, meldet macOS, die App „kann nicht
   Zellen geteilt, eine pro LED, und jede Zelle gemittelt.
 - **Waagerecht / senkrecht** – waagerechte Zonen laufen links → rechts,
   senkrechte oben → unten. Ist ein Streifen andersherum verkabelt, wird das pro
-  Gerät mit **Streifen läuft rückwärts** korrigiert (spiegelt den ganzen
+  Gerät mit **Reihenfolge umkehren** korrigiert (spiegelt den ganzen
   Streifen inklusive der Reihenfolge aufgeteilter Zonen).
 - **Aufnahmeauflösung** – der Bildschirm wird auf einen kleinen Puffer
   verkleinert (Standard 320 px breit). Das ist die Genauigkeit der Zonen; höhere
@@ -171,7 +229,9 @@ Alles wird automatisch als JSON gespeichert:
 
 Alle Zonenkoordinaten sind normalisiert (0…1) relativ zum aufgenommenen
 Bildschirm, die Datei lässt sich also zwischen Rechnern kopieren. Sie wird
-atomar geschrieben (kein halb geschriebener Zustand bei Absturz).
+atomar geschrieben (kein halb geschriebener Zustand bei Absturz). Sie enthält
+den Nanoleaf-Kopplungsschlüssel (gilt nur für dieses eine Gerät im eigenen
+Netz) – also nicht öffentlich posten.
 
 ## Funktionsweise
 
@@ -189,12 +249,18 @@ atomar geschrieben (kein halb geschriebener Zustand bei Absturz).
               Gamma, Sättigung, Helligkeit, BGR, Rückwärts
                                  │
                                  ▼
-                 DDP / DRGB über UDP ──► WLED-Geräte
+     eine Ausgabe pro Gerät, jede in eigenem Thread (außer WLED)
+                                 │
+   WLED (DDP/DRGB) · OpenRGB (TCP) · Razer (HTTP) · Govee (UDP) · Nanoleaf (UDP)
 ```
 
 Die Pipeline läuft in einem eigenen Thread auf einem festen Takt, der ein
 Vielfaches der Zielrate ist – so greifen die Obergrenzen pro Gerät exakt und
-die Oberfläche kann die LEDs nie ausbremsen. Neue Bilder werden einmal
+die Oberfläche kann die LEDs nie ausbremsen. Geräte, die TCP/HTTP oder einen
+Verbindungsaufbau brauchen, laufen in eigenen Threads, bekommen nur das jeweils
+neueste Bild und verbinden sich selbst neu – ein nicht erreichbares Gerät hält
+die anderen nie auf. Beim Beenden werden alle Sitzungen sauber geschlossen
+(Razer-Sitzung beendet, Govee-Echtzeitmodus aus). Neue Bilder werden einmal
 abgetastet; Takte dazwischen führen nur die Glättung weiter, Übergänge bleiben
 dadurch flüssig.
 
@@ -209,9 +275,14 @@ ausgeblendet.
 | --- | --- |
 | Kein Gerät gefunden | Gleiches Netz/VLAN? Firewalls müssen ausgehendes UDP und mDNS erlauben. Gerät per IP hinzufügen. |
 | LEDs flackern | *Zeitliche Glättung* erhöhen oder *Max. Änderung pro Sekunde* senken; Netzteil und ABL-Limit in WLED prüfen. |
-| Farben laufen falsch herum | *Streifen läuft rückwärts* in der Gerätekarte. |
+| Farben laufen falsch herum | *Reihenfolge umkehren* in der Gerätekarte. |
 | Rot und Blau vertauscht | *Rot und Blau tauschen (BGR)*, oder die Farbreihenfolge in WLEDs LED-Einstellungen setzen. |
 | WLED zeigt wieder den eigenen Effekt | Die App sendet dauerhaft, auch pausiert; prüfen, ob in WLED *Realtime* aktiv und das Gerät hier eingeschaltet ist. |
+| OpenRGB: „nicht erreichbar“ | OpenRGB starten und *SDK Server* einschalten (Port 6742). Hersteller-Software des Geräts beenden. |
+| OpenRGB: Gerät springt zwischen zwei Farben | Die Hersteller-Software (iCUE, Synapse, G Hub …) läuft noch für dieses Gerät. |
+| Razer: „Synapse nicht erreichbar“ | Synapse muss laufen und angemeldet sein; in Synapse *Chroma Apps* einschalten. |
+| Govee nicht gefunden / bleibt dunkel | *LAN-Steuerung* in der Govee-Home-App einschalten; App in der Firewall erlauben (UDP 4002); Segmentzahl prüfen. |
+| Nanoleaf: „nicht im Kopplungsmodus“ | Ein/Aus-Taste am Controller 5–7 s halten, bis die LEDs blinken, dann innerhalb von 30 s *Koppeln* klicken. |
 | Linux: „gst-launch-1.0 nicht gefunden“ | GStreamer und PipeWire-Plugin installieren (siehe *Installation*) oder das Flatpak nutzen. |
 | Linux: falscher Monitor | *App → Anderen Monitor wählen* fragt das Portal erneut. |
 | macOS: schwarze Vorschau / Fehler | Berechtigung *Bildschirmaufnahme* erteilen und App neu starten (macOS-Regel). Nach einem Update braucht ein unsignierter Build die Berechtigung eventuell erneut. |

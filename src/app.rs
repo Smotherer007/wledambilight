@@ -12,9 +12,12 @@ use std::time::{Duration, Instant};
 use egui::{Color32, CornerRadius, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, Vec2};
 
 use crate::capture::{self, CaptureStatus};
+use crate::config::DeviceKind;
 use crate::config::{Config, DeviceCfg, Protocol, Zone, ZonePreset};
+use crate::discovery::{self, Found};
 use crate::i18n::{self, tr};
 use crate::icons::{self, Icon, Kind};
+use crate::output;
 use crate::theme::{self, HandCursor};
 use crate::tray::{Tray, TrayState};
 use crate::wled::{self, WledInfo};
@@ -128,6 +131,18 @@ struct Snapshot {
 }
 
 type Probe = Arc<Mutex<Option<Result<WledInfo, String>>>>;
+/// Nanoleaf pairing in the background: (token, panel count)
+type Pairing = Arc<Mutex<Option<Result<(String, u16), String>>>>;
+
+/// What one "LED" of a device is called on its card.
+fn unit(kind: DeviceKind) -> &'static str {
+    match kind {
+        DeviceKind::Govee => tr("Segmente", "segments"),
+        DeviceKind::Nanoleaf => tr("Panels", "panels"),
+        DeviceKind::Razer => tr("Spalten", "columns"),
+        _ => "LEDs",
+    }
+}
 
 pub struct App {
     cfg: Config,
@@ -139,9 +154,12 @@ pub struct App {
     drag: Option<DragState>,
     selected: Option<usize>,
     tab: Tab,
-    scan: Option<wled::Scan>,
+    scan: Option<discovery::Scan>,
     manual_host: String,
     manual_probe: Option<Probe>,
+    manual_kind: DeviceKind,
+    manual_error: Option<Arc<Mutex<Option<String>>>>,
+    pairing: Option<(String, Pairing)>,
     expanded: HashSet<String>,
     confirm_remove: Option<String>,
     notice: Option<(String, Instant)>,
@@ -198,6 +216,9 @@ impl App {
             scan: None,
             manual_host: String::new(),
             manual_probe: None,
+            manual_kind: DeviceKind::Wled,
+            manual_error: None,
+            pairing: None,
             expanded: cfg
                 .devices
                 .first()
@@ -293,7 +314,7 @@ impl App {
 
     fn start_scan(&mut self) {
         if self.scan.is_none() {
-            self.scan = Some(wled::search());
+            self.scan = Some(discovery::search());
         }
     }
 
@@ -332,17 +353,17 @@ impl App {
 
     // ------------------------------------------------------------ actions
 
-    /// A new device starts as one zone that uses the whole strip.
-    fn add_device(&mut self, host: String, name: String, leds: u16) {
-        if self.cfg.device(&host).is_some() {
+    /// A new device starts as one zone that uses all of its LEDs.
+    fn add_device(&mut self, dev: DeviceCfg) {
+        if self.cfg.device(&dev.id).is_some() {
             self.notify(format!(
-                "{host} {}",
+                "{} {}",
+                dev.name,
                 tr("ist schon in der Liste", "is already in the list")
             ));
             return;
         }
-        let dev = DeviceCfg::new(&host, name.clone(), leds);
-        let id = dev.id.clone();
+        let (id, name, leds, kind) = (dev.id.clone(), dev.name.clone(), dev.led_count, dev.kind);
         let edge = self.next_free_edge();
         let mut zone = Zone::preset(edge, id.clone(), leds.max(1), self.next_zone_color());
         zone.name = name.clone();
@@ -350,12 +371,32 @@ impl App {
         self.cfg.zones.push(zone);
         self.selected = Some(self.cfg.zones.len() - 1);
         self.expanded.insert(id);
-        self.notify(if i18n::is_de() {
-            format!("{name} hinzugefügt – eine Zone mit allen {leds} LEDs")
-        } else {
-            format!("{name} added – one zone with all {leds} LEDs")
+        self.notify(match kind {
+            DeviceKind::Nanoleaf => tr(
+                "Nanoleaf hinzugefügt – jetzt in der Gerätekarte koppeln",
+                "Nanoleaf added – now pair it in the device card",
+            )
+            .to_string(),
+            _ if i18n::is_de() => format!(
+                "{name} hinzugefügt – eine Zone mit allen {leds} {}",
+                unit(kind)
+            ),
+            _ => format!("{name} added – one zone with all {leds} {}", unit(kind)),
         });
         self.changed();
+    }
+
+    /// The LED count of a device changed (segments, pairing): a zone that
+    /// covered the whole device keeps covering it.
+    fn resize_device(&mut self, id: &str, old: u16, new: u16) {
+        let zones: Vec<usize> = (0..self.cfg.zones.len())
+            .filter(|i| self.cfg.zones[*i].device == id)
+            .collect();
+        if let [only] = zones[..] {
+            if self.cfg.zones[only].count == old {
+                self.cfg.zones[only].count = new.max(1);
+            }
+        }
     }
 
     /// Add another zone on the selected device, using the LEDs that are still free.
@@ -974,18 +1015,23 @@ impl App {
     fn device_cards(&mut self, ui: &mut egui::Ui) {
         let mut devices = std::mem::take(&mut self.cfg.devices);
         let mut remove: Option<usize> = None;
+        let mut resized: Vec<(String, u16, u16)> = Vec::new();
+        let mut start_pairing: Option<(String, String)> = None;
         let mut any_change = false;
+        let statuses = self.snap.stats.devices.clone();
+        let pairing_id = self.pairing.as_ref().map(|p| p.0.clone());
         for (i, dev) in devices.iter_mut().enumerate() {
             let used = self.cfg.used_leds(&dev.id, None);
             let open = self.expanded.contains(&dev.id);
             let before = dev.clone();
+            let unpaired = dev.kind == DeviceKind::Nanoleaf && dev.token.is_none();
             theme::card_with(
                 ui,
                 theme::SURFACE,
                 if open { theme::LINE_HI } else { theme::LINE },
                 |ui| {
                     // header: always visible
-                    let header = ui.horizontal(|ui| {
+                    ui.horizontal(|ui| {
                         let dot = if dev.enabled {
                             theme::MINT
                         } else {
@@ -993,7 +1039,10 @@ impl App {
                         };
                         let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                         ui.painter().circle_filled(r.center(), 4.0, dot);
-                        ui.label(RichText::new(&dev.name).font(theme::semibold(13.5)));
+                        ui.add(
+                            egui::Label::new(RichText::new(&dev.name).font(theme::semibold(13.5)))
+                                .truncate(),
+                        );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             theme::switch(ui, &mut dev.enabled, "")
                                 .on_hover_text(tr("Gerät aktiv", "Device active"));
@@ -1011,17 +1060,26 @@ impl App {
                             }
                         });
                     });
-                    let _ = header;
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(&dev.host).size(11.5).color(theme::INK_FAINT));
+                        ui.label(
+                            RichText::new(dev.kind.label())
+                                .size(11.0)
+                                .color(theme::AMBER),
+                        );
+                        // Razer always lives on this PC; no address to show
+                        if dev.kind != DeviceKind::Razer {
+                            ui.label(RichText::new(&dev.host).size(11.5).color(theme::INK_FAINT));
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let txt = if i18n::is_de() {
-                                format!("{used} / {} LEDs belegt", dev.led_count)
+                            let txt = if unpaired {
+                                tr("nicht gekoppelt", "not paired").to_string()
+                            } else if i18n::is_de() {
+                                format!("{used} / {} {} belegt", dev.led_count, unit(dev.kind))
                             } else {
-                                format!("{used} / {} LEDs used", dev.led_count)
+                                format!("{used} / {} {} used", dev.led_count, unit(dev.kind))
                             };
                             ui.label(RichText::new(txt).size(11.5).color(
-                                if used > dev.led_count {
+                                if used > dev.led_count || unpaired {
                                     theme::CORAL
                                 } else {
                                     theme::INK_DIM
@@ -1030,38 +1088,141 @@ impl App {
                         });
                     });
                     theme::usage_bar(ui, used as f32, dev.led_count as f32);
-                    if used > dev.led_count {
+                    // connection state (WLED is fire-and-forget UDP: nothing to show)
+                    if dev.enabled && dev.kind != DeviceKind::Wled && !unpaired {
+                        let (txt, col) = match statuses.get(&dev.id) {
+                            Some(output::Status::Ok) => {
+                                (tr("Verbunden", "Connected").to_string(), theme::MINT)
+                            }
+                            Some(output::Status::Error(e)) => (e.clone(), theme::CORAL),
+                            _ => (
+                                tr("Verbinde …", "Connecting …").to_string(),
+                                theme::INK_FAINT,
+                            ),
+                        };
+                        ui.label(RichText::new(txt).size(11.5).color(col));
+                    }
+                    if used > dev.led_count && !unpaired {
                         theme::hint(
                             ui,
                             tr(
-                                "Die Zonen brauchen mehr LEDs, als der Streifen hat.",
-                                "The zones need more LEDs than the strip has.",
+                                "Die Zonen brauchen mehr LEDs, als das Gerät hat.",
+                                "The zones need more LEDs than the device has.",
                             ),
                         );
+                    }
+
+                    if unpaired {
+                        ui.add_space(6.0);
+                        theme::hint(
+                            ui,
+                            tr(
+                                "Zum Koppeln die Ein/Aus-Taste am Nanoleaf-Controller 5–7 Sekunden halten, bis die LEDs blinken – dann innerhalb von 30 Sekunden „Koppeln“ klicken.",
+                                "To pair, hold the power button on the Nanoleaf controller for 5–7 seconds until the LEDs flash, then click “Pair” within 30 seconds.",
+                            ),
+                        );
+                        if pairing_id.as_deref() == Some(dev.id.as_str()) {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new().size(12.0));
+                                theme::hint(ui, tr("Kopple …", "Pairing …"));
+                            });
+                        } else if icons::labelled(
+                            ui,
+                            Icon::Plus,
+                            tr("Koppeln", "Pair"),
+                            Kind::Primary,
+                        ) {
+                            start_pairing = Some((dev.id.clone(), dev.host.clone()));
+                        }
                     }
 
                     if !open {
                         return;
                     }
                     ui.add_space(8.0);
-                    theme::field_label(ui, tr("Protokoll", "Protocol"));
-                    theme::segmented(
-                        ui,
-                        &mut dev.protocol,
-                        &[
-                            (Protocol::Ddp, "DDP · 4048"),
-                            (Protocol::Drgb, "DRGB · 21324"),
-                        ],
-                        Some(ui.available_width()),
-                    );
-                    if dev.protocol == Protocol::Drgb && dev.led_count as usize > wled::DRGB_MAX {
-                        theme::hint(
-                            ui,
-                            tr(
-                                "DRGB überträgt höchstens 490 LEDs – für mehr DDP nutzen.",
-                                "DRGB carries at most 490 LEDs – use DDP for more.",
-                            ),
-                        );
+                    match dev.kind {
+                        DeviceKind::Wled => {
+                            theme::field_label(ui, tr("Protokoll", "Protocol"));
+                            theme::segmented(
+                                ui,
+                                &mut dev.protocol,
+                                &[
+                                    (Protocol::Ddp, "DDP · 4048"),
+                                    (Protocol::Drgb, "DRGB · 21324"),
+                                ],
+                                Some(ui.available_width()),
+                            );
+                            if dev.protocol == Protocol::Drgb
+                                && dev.led_count as usize > wled::DRGB_MAX
+                            {
+                                theme::hint(
+                                    ui,
+                                    tr(
+                                        "DRGB überträgt höchstens 490 LEDs – für mehr DDP nutzen.",
+                                        "DRGB carries at most 490 LEDs – use DDP for more.",
+                                    ),
+                                );
+                            }
+                        }
+                        DeviceKind::Govee | DeviceKind::Razer => {
+                            let (label, range) = if dev.kind == DeviceKind::Govee {
+                                (tr("Segmente", "Segments"), 1..=84)
+                            } else {
+                                (
+                                    tr("Spalten (links → rechts)", "Columns (left → right)"),
+                                    2..=44,
+                                )
+                            };
+                            ui.horizontal(|ui| {
+                                theme::field_label(ui, label);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let mut n = dev.led_count as u32;
+                                        if ui
+                                            .add(egui::DragValue::new(&mut n).range(range))
+                                            .changed()
+                                        {
+                                            resized.push((dev.id.clone(), dev.led_count, n as u16));
+                                            dev.led_count = n as u16;
+                                        }
+                                    },
+                                );
+                            });
+                            theme::hint(
+                                ui,
+                                if dev.kind == DeviceKind::Govee {
+                                    tr(
+                                        "„LAN-Steuerung“ muss in der Govee-Home-App für das Gerät eingeschaltet sein. Die Segmentzahl steht in der Anleitung des Modells (meist 10–15).",
+                                        "“LAN Control” must be switched on for the device in the Govee Home app. The segment count is in the model's manual (usually 10–15).",
+                                    )
+                                } else {
+                                    tr(
+                                        "Synapse muss laufen und „Chroma Apps“ eingeschaltet sein. Die Farben verteilen sich von links nach rechts auf Tastatur, Maus, Mauspad, Headset und Chroma-Connect-Geräte.",
+                                        "Synapse must be running with “Chroma Apps” switched on. The colours spread left to right over keyboard, mouse, mouse pad, headset and Chroma Connect devices.",
+                                    )
+                                },
+                            );
+                        }
+                        DeviceKind::OpenRgb => {
+                            theme::hint(
+                                ui,
+                                tr(
+                                    "OpenRGB muss mit eingeschaltetem SDK-Server laufen. Hersteller-Software (iCUE, Synapse, G Hub …) für dieses Gerät beenden, sonst kämpfen beide um die LEDs.",
+                                    "OpenRGB must be running with its SDK server switched on. Quit vendor software (iCUE, Synapse, G Hub …) for this device, otherwise both fight over the LEDs.",
+                                ),
+                            );
+                        }
+                        DeviceKind::Nanoleaf => {
+                            if !unpaired
+                                && ui
+                                    .button(tr("Neu koppeln", "Pair again"))
+                                    .hand_cursor()
+                                    .clicked()
+                            {
+                                dev.token = None;
+                            }
+                        }
                     }
                     ui.add_space(4.0);
                     theme::slider_row(
@@ -1074,7 +1235,8 @@ impl App {
                     ui.horizontal(|ui| {
                         theme::field_label(ui, tr("Max. Bildrate", "Max. frame rate"));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let opts = [0u32, 15, 20, 24, 25, 30, 40, 50, 60, 72, 100, 120, 144];
+                            let opts =
+                                [0u32, 10, 15, 20, 24, 25, 30, 40, 50, 60, 72, 100, 120, 144];
                             theme::combo(
                                 ui,
                                 ("fps", i),
@@ -1095,29 +1257,33 @@ impl App {
                     theme::switch(
                         ui,
                         &mut dev.reverse,
-                        tr("Streifen läuft rückwärts", "Strip runs backwards"),
+                        tr("Reihenfolge umkehren", "Reverse order"),
                     )
                     .on_hover_text(tr(
-                        "Spiegelt den ganzen Streifen, wenn die Datenleitung am anderen Ende sitzt",
-                        "Mirrors the whole strip when the data line is at the other end",
+                        "Spiegelt das ganze Gerät, z. B. wenn die Datenleitung am anderen Ende sitzt",
+                        "Mirrors the whole device, e.g. when the data line is at the other end",
                     ));
-                    theme::switch(
-                        ui,
-                        &mut dev.bgr,
-                        tr("Rot und Blau tauschen (BGR)", "Swap red and blue (BGR)"),
-                    )
-                    .on_hover_text(tr(
-                        "Nur für Streifen mit vertauschten Kanälen",
-                        "Only for strips with swapped channels",
-                    ));
+                    if dev.kind == DeviceKind::Wled {
+                        theme::switch(
+                            ui,
+                            &mut dev.bgr,
+                            tr("Rot und Blau tauschen (BGR)", "Swap red and blue (BGR)"),
+                        )
+                        .on_hover_text(tr(
+                            "Nur für Streifen mit vertauschten Kanälen",
+                            "Only for strips with swapped channels",
+                        ));
+                    }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if icons::labelled(
-                            ui,
-                            Icon::Power,
-                            tr("LEDs aus", "LEDs off"),
-                            Kind::Secondary,
-                        ) {
+                        if dev.kind == DeviceKind::Wled
+                            && icons::labelled(
+                                ui,
+                                Icon::Power,
+                                tr("LEDs aus", "LEDs off"),
+                                Kind::Secondary,
+                            )
+                        {
                             let mut sender = wled::Sender::new(&dev.host, dev.protocol);
                             sender.send(&vec![[0u8; 3]; dev.led_count as usize]);
                         }
@@ -1155,8 +1321,53 @@ impl App {
             any_change = true;
         }
         self.cfg.devices = devices;
+        for (id, old, new) in resized {
+            self.resize_device(&id, old, new);
+        }
+        if let Some((id, host)) = start_pairing {
+            let out: Pairing = Arc::new(Mutex::new(None));
+            let o = out.clone();
+            std::thread::spawn(move || {
+                let res = output::nanoleaf::pair(&host).and_then(|token| {
+                    let panels = output::nanoleaf::layout(&host, &token)?;
+                    Ok((token, panels.len().max(1) as u16))
+                });
+                *o.lock().unwrap() = Some(res);
+            });
+            self.pairing = Some((id, out));
+        }
+        self.poll_pairing(ui.ctx());
         if any_change {
             self.changed();
+        }
+    }
+
+    fn poll_pairing(&mut self, ctx: &egui::Context) {
+        let Some((id, p)) = self.pairing.clone() else {
+            return;
+        };
+        let Some(res) = p.lock().unwrap().take() else {
+            ctx.request_repaint_after(Duration::from_millis(200));
+            return;
+        };
+        self.pairing = None;
+        match res {
+            Ok((token, panels)) => {
+                let Some(dev) = self.cfg.devices.iter_mut().find(|d| d.id == id) else {
+                    return;
+                };
+                let old = dev.led_count;
+                dev.token = Some(token);
+                dev.led_count = panels;
+                self.resize_device(&id, old, panels);
+                self.notify(if i18n::is_de() {
+                    format!("Nanoleaf gekoppelt – {panels} Panels")
+                } else {
+                    format!("Nanoleaf paired – {panels} panels")
+                });
+                self.changed();
+            }
+            Err(e) => self.notify(e),
         }
     }
 
@@ -1165,47 +1376,52 @@ impl App {
             return;
         };
         let list = scan.found.lock().unwrap().clone();
-        let finished = *scan.done.lock().unwrap();
-        let pending: Vec<WledInfo> = list
+        let finished = scan.done();
+        let pending: Vec<Found> = list
             .into_iter()
-            .filter(|i| self.cfg.device(&i.host).is_none())
+            .filter(|f| self.cfg.device(&f.id).is_none())
             .collect();
         if finished && pending.is_empty() {
             let found_any = !self.cfg.devices.is_empty();
             self.scan = None;
             if !found_any {
                 self.notify(tr(
-                    "Kein WLED-Gerät gefunden. Gleiches Netzwerk? Sonst per Adresse hinzufügen.",
-                    "No WLED device found. Same network? Otherwise add it by address.",
+                    "Kein Gerät gefunden. Gleiches Netzwerk? Sonst per Adresse hinzufügen.",
+                    "No device found. Same network? Otherwise add it by address.",
                 ));
             }
             return;
         }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            theme::field_label(ui, tr("Im Netzwerk gefunden", "Found on the network"));
+            theme::field_label(ui, tr("Gefunden", "Found"));
             if !finished {
                 ui.add(egui::Spinner::new().size(12.0).color(theme::INK_FAINT));
             }
         });
-        for info in &pending {
+        for f in &pending {
             theme::card_with(ui, theme::WALL, theme::LINE, |ui| {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 2.0;
-                        ui.label(RichText::new(&info.name).font(theme::semibold(13.0)));
+                        ui.add(
+                            egui::Label::new(RichText::new(&f.name).font(theme::semibold(13.0)))
+                                .truncate(),
+                        );
+                        let leds = if f.leds > 0 {
+                            format!(" · {} {}", f.leds, unit(f.kind))
+                        } else {
+                            String::new()
+                        };
                         ui.label(
-                            RichText::new(format!(
-                                "{} · {} LEDs · v{} · {}",
-                                info.host, info.leds, info.version, info.arch
-                            ))
-                            .size(11.5)
-                            .color(theme::INK_FAINT),
+                            RichText::new(format!("{}{leds} · {}", f.kind.label(), f.detail))
+                                .size(11.5)
+                                .color(theme::INK_FAINT),
                         );
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if icons::button(ui, Icon::Plus, tr("Hinzufügen", "Add")) {
-                            self.add_device(info.host.clone(), info.name.clone(), info.leds);
+                            self.add_device(f.clone().into_device());
                         }
                     });
                 });
@@ -1219,13 +1435,31 @@ impl App {
 
     fn manual_add(&mut self, ui: &mut egui::Ui) {
         theme::field_label(ui, tr("Per Adresse hinzufügen", "Add by address"));
+        let w = ui.available_width();
+        theme::segmented(
+            ui,
+            &mut self.manual_kind,
+            &[
+                (DeviceKind::Wled, "WLED"),
+                (DeviceKind::OpenRgb, "OpenRGB"),
+                (DeviceKind::Govee, "Govee"),
+                (DeviceKind::Nanoleaf, "Nanoleaf"),
+            ],
+            Some(w),
+        );
+        ui.add_space(4.0);
         let mut submit = false;
         ui.horizontal(|ui| {
             // text field + its inner margin + spacing + the 28 px button
             let w = (ui.available_width() - 28.0 - 8.0 - 16.0).max(60.0);
+            let hint = if self.manual_kind == DeviceKind::OpenRgb {
+                "192.168.1.50:6742"
+            } else {
+                "192.168.1.50"
+            };
             let r = ui.add(
                 egui::TextEdit::singleline(&mut self.manual_host)
-                    .hint_text(RichText::new("192.168.1.50").color(theme::INK_FAINT))
+                    .hint_text(RichText::new(hint).color(theme::INK_FAINT))
                     .desired_width(w)
                     .margin(egui::Margin::symmetric(8, 6)),
             );
@@ -1240,8 +1474,40 @@ impl App {
                 submit = true;
             }
         });
-        if submit && !self.manual_host.trim().is_empty() && self.manual_probe.is_none() {
-            self.manual_probe = Some(wled::probe_in_background(self.manual_host.clone()));
+        let host = self.manual_host.trim().to_string();
+        if submit && !host.is_empty() && self.manual_probe.is_none() {
+            match self.manual_kind {
+                DeviceKind::Wled => {
+                    self.manual_probe = Some(wled::probe_in_background(host));
+                }
+                DeviceKind::OpenRgb => {
+                    let (h, port) = match host.rsplit_once(':') {
+                        Some((h, p)) => (
+                            h.to_string(),
+                            p.parse().unwrap_or(output::openrgb::DEFAULT_PORT),
+                        ),
+                        None => (host.clone(), output::openrgb::DEFAULT_PORT),
+                    };
+                    let scan = self.scan.get_or_insert_with(discovery::empty);
+                    self.manual_error = Some(discovery::openrgb_at(scan, h, port));
+                    self.manual_host.clear();
+                }
+                DeviceKind::Govee => {
+                    self.add_device(Found::govee(&host, "", "").into_device());
+                    self.manual_host.clear();
+                }
+                DeviceKind::Nanoleaf => {
+                    self.add_device(Found::nanoleaf(&host, "").into_device());
+                    self.manual_host.clear();
+                }
+                DeviceKind::Razer => {}
+            }
+        }
+        if let Some(e) = self.manual_error.clone() {
+            if let Some(msg) = e.lock().unwrap().take() {
+                self.manual_error = None;
+                self.notify(msg);
+            }
         }
         if let Some(p) = self.manual_probe.clone() {
             let res = p.lock().unwrap().take();
@@ -1256,7 +1522,7 @@ impl App {
                 Some(Ok(info)) => {
                     self.manual_probe = None;
                     self.manual_host.clear();
-                    self.add_device(info.host, info.name, info.leds);
+                    self.add_device(Found::wled(&info).into_device());
                 }
                 Some(Err(host)) => {
                     self.manual_probe = None;
@@ -1929,8 +2195,13 @@ impl App {
             .filter(|(_, d)| d.enabled)
             .map(|(i, d)| (i, d.name.clone(), d.bgr))
             .collect();
+        // header + up to four tape rows (the rest scrolls), plus margins
+        let rows = devices.len();
+        let row_h = if rows > 3 { 14.0 } else { 18.0 };
+        let height = 24.0 + 42.0 + rows.clamp(1, 4) as f32 * (row_h + 6.0);
         egui::Panel::bottom("output")
             .resizable(false)
+            .exact_size(height)
             .frame(
                 egui::Frame::new()
                     .fill(theme::PANEL)
@@ -1966,23 +2237,33 @@ impl App {
                 if devices.is_empty() {
                     theme::hint(ui, tr("Noch kein Gerät aktiv.", "No device active yet."));
                 }
-                for (i, name, bgr) in devices {
-                    ui.horizontal(|ui| {
-                        let (r, _) = ui.allocate_exact_size(Vec2::new(130.0, 20.0), Sense::hover());
-                        ui.painter().text(
-                            Pos2::new(r.left(), r.center().y),
-                            egui::Align2::LEFT_CENTER,
-                            &name,
-                            theme::regular(12.0),
-                            theme::INK_DIM,
-                        );
-                        let mut colors = self.snap.last.get(i).cloned().unwrap_or_default();
-                        if bgr {
-                            colors.iter_mut().for_each(|c| c.swap(0, 2));
+                // about four rows, the rest scrolls - the preview keeps its space
+                egui::ScrollArea::vertical()
+                    .max_height(4.0 * (row_h + 6.0))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        // compact rows: egui would make every row 28 px high
+                        ui.spacing_mut().interact_size.y = row_h;
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        for (i, name, bgr) in devices {
+                            ui.horizontal(|ui| {
+                                let (r, _) =
+                                    ui.allocate_exact_size(Vec2::new(130.0, row_h), Sense::hover());
+                                ui.painter().text(
+                                    Pos2::new(r.left(), r.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    &name,
+                                    theme::regular(12.0),
+                                    theme::INK_DIM,
+                                );
+                                let mut colors = self.snap.last.get(i).cloned().unwrap_or_default();
+                                if bgr {
+                                    colors.iter_mut().for_each(|c| c.swap(0, 2));
+                                }
+                                theme::led_tape(ui, &colors, row_h);
+                            });
                         }
-                        theme::led_tape(ui, &colors, 18.0);
                     });
-                }
             });
     }
 

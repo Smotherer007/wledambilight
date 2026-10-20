@@ -3,13 +3,13 @@ name = "wled-ambilight"
 version = "0.2.0"
 edition = "2021"
 rust-version = "1.90"
-description = "Lightweight ambilight for WLED: captures the screen, samples freely placed zones and streams the colours to WLED via DDP."
+description = "Lightweight ambilight: captures the screen, samples freely placed zones and streams the colours to WLED, OpenRGB, Razer Chroma, Govee and Nanoleaf."
 authors = ["Patrick Weppelmann <patrick.weppelmann@neoimpulse.de>"]
 license = "GPL-3.0-only"
 repository = "https://github.com/Smotherer007/wledambilight"
 homepage = "https://github.com/Smotherer007/wledambilight"
 readme = "README.md"
-keywords = ["wled", "ambilight", "led", "ddp", "screen-capture"]
+keywords = ["wled", "ambilight", "openrgb", "govee", "nanoleaf"]
 categories = ["multimedia", "gui"]
 publish = false
 
@@ -26,6 +26,8 @@ serde_json = "1.0.154"
 mdns-sd = "0.21"
 dirs = "7"
 sys-locale = "0.3"
+# HTTP for Razer Chroma (localhost) and Nanoleaf (LAN); no TLS needed
+ureq = { version = "3", default-features = false, features = ["json"] }
 
 # Linux: xdg-desktop-portal + PipeWire (via GStreamer) and a StatusNotifierItem tray
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -64,7 +66,8 @@ copyright = "2026 Patrick Weppelmann"
 license-file = ["LICENSE", "0"]
 extended-description = """\
 Captures the screen through the XDG desktop portal (PipeWire), samples freely \
-placed zones and streams the colours to WLED devices via DDP or DRGB."""
+placed zones and streams the colours to WLED, OpenRGB, Govee and Nanoleaf \
+devices in the local network."""
 depends = "$auto, gstreamer1.0-tools, gstreamer1.0-pipewire, gstreamer1.0-plugins-base, xdg-desktop-portal"
 section = "video"
 priority = "optional"

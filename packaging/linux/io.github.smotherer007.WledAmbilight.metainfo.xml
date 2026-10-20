@@ -6,8 +6,8 @@
   <project_license>GPL-3.0-only</project_license>
 
   <name>WLED Ambilight</name>
-  <summary>Send the colours of your screen to WLED LED strips</summary>
-  <summary xml:lang="de">Bildschirmfarben an WLED-LED-Streifen senden</summary>
+  <summary>Send the colours of your screen to your LEDs</summary>
+  <summary xml:lang="de">Bildschirmfarben an die LEDs im Raum senden</summary>
 
   <developer id="io.github.smotherer007">
     <name>Patrick Weppelmann</name>
@@ -16,16 +16,19 @@
   <description>
     <p>
       WLED Ambilight captures your screen, averages freely placed zones and
-      streams the colours to one or more WLED devices in real time – the glow
-      behind your monitor follows the picture.
+      streams the colours in real time to WLED strips, PC peripherals,
+      Govee lights and Nanoleaf panels – the glow behind your monitor follows
+      the picture.
     </p>
     <p xml:lang="de">
       WLED Ambilight nimmt den Bildschirm auf, mittelt frei platzierbare Zonen
-      und schickt die Farben in Echtzeit an ein oder mehrere WLED-Geräte – das
-      Licht hinter dem Monitor folgt dem Bild.
+      und schickt die Farben in Echtzeit an WLED-Streifen, PC-Peripherie,
+      Govee-Leuchten und Nanoleaf-Panels – das Licht hinter dem Monitor folgt
+      dem Bild.
     </p>
     <ul>
-      <li>Finds WLED devices on the network automatically (mDNS and subnet scan)</li>
+      <li>Drives WLED, OpenRGB (PC peripherals), Razer Chroma, Govee and Nanoleaf – no account, no cloud</li>
+      <li>Finds devices on the network automatically</li>
       <li>Zones are placed and resized with the mouse, independent of resolution</li>
       <li>Any number of LEDs per device via DDP, DRGB for older firmware</li>
       <li>Temporal and spatial smoothing, median filter, brightness, gamma and saturation</li>
@@ -56,6 +59,10 @@
     <keyword>Ambilight</keyword>
     <keyword>LED</keyword>
     <keyword>DDP</keyword>
+    <keyword>OpenRGB</keyword>
+    <keyword>Govee</keyword>
+    <keyword>Nanoleaf</keyword>
+    <keyword>Razer Chroma</keyword>
   </keywords>
 
   <requires>

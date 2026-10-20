@@ -29,6 +29,8 @@ pub struct Stats {
     pub fps_in: f32,
     pub fps_out: f32,
     pub sample_us: u128,
+    /// connection state per device id (outputs that are open)
+    pub devices: std::collections::HashMap<String, crate::output::Status>,
 }
 
 impl Default for Stats {
@@ -40,6 +42,7 @@ impl Default for Stats {
             fps_in: 0.0,
             fps_out: 0.0,
             sample_us: 0,
+            devices: Default::default(),
         }
     }
 }
@@ -245,7 +248,9 @@ fn run(shared: Arc<Shared>, stop: Arc<AtomicBool>) {
                 st.fps_in = v;
             }
             st.fps_out = engine.send_fps;
+            st.devices = engine.statuses();
             st.sample_us = engine.last_sample_us;
         }
     }
+    engine.shutdown();
 }

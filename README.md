@@ -6,18 +6,22 @@
 
 **Deutsch:** [README.de.md](README.de.md)
 
-A lightweight ambilight for [WLED](https://kno.wled.ge/). It captures your
-screen, averages freely placed zones and streams the colours to one or more
-WLED devices in real time – the light behind your monitor or TV follows the
-picture. Runs on **Linux, Windows and macOS**.
+A lightweight ambilight for [WLED](https://kno.wled.ge/) and more. It
+captures your screen, averages freely placed zones and streams the colours in
+real time to WLED strips, PC peripherals (via OpenRGB and Razer Chroma),
+Govee lights and Nanoleaf panels – the light behind your monitor or TV and
+on your desk follows the picture. Runs on **Linux, Windows and macOS**,
+entirely in your local network: no account, no cloud.
 
 ![WLED Ambilight with four edge zones and a free zone on the preview](docs/screenshot.png)
 
 ## Features
 
-- **Finds your devices by itself** – mDNS plus a sweep of the local subnet;
-  LED count, name and firmware come from WLED's `/json/info`. Devices on
-  other subnets can be added by IP or host name.
+- **Five device types** – WLED, OpenRGB, Razer Chroma, Govee and Nanoleaf,
+  mixed freely in one setup (see [Supported devices](#supported-devices)).
+- **Finds your devices by itself** – one search covers all types (mDNS,
+  subnet sweep, Govee LAN scan, local OpenRGB and Synapse). Devices on other
+  subnets can be added by IP or host name.
 - **Zones instead of fixed layouts** – a zone is any rectangle on the screen
   that drives a section of a strip. Drag and resize with the mouse, snap to
   edges and other zones, nudge with the arrow keys. Coordinates are
@@ -38,6 +42,55 @@ picture. Runs on **Linux, Windows and macOS**.
 - **Background operation** – tray / menu bar icon, close-to-tray,
   `--minimized` for autostart, `--headless` for setups without a desktop.
 - **German and English** interface, following the system language.
+
+## Supported devices
+
+| Device | How it is reached | Resolution | System | Setup once |
+| --- | --- | --- | --- | --- |
+| **WLED** | DDP (UDP 4048) or DRGB (UDP 21324) | every LED | all | none |
+| **OpenRGB** – keyboards, mice, RAM, fans, mainboards, GPUs, light strips of almost every vendor | OpenRGB SDK server (TCP 6742) | every LED | all | start [OpenRGB](https://openrgb.org) and switch on its *SDK Server* |
+| **Razer Chroma** – Razer devices plus *Chroma Connect* partners | REST API of Razer Synapse on `localhost` | columns left → right | Windows | Synapse running, *Chroma Apps* on, logged in |
+| **Govee** – LED strips, TV backlights, light bars with LAN control | LAN API (UDP 4001–4003), realtime mode | segments (usually 10–15) | all | *LAN Control* on for the device in the Govee Home app |
+| **Nanoleaf** – Shapes, Canvas, Elements, Lines, Light Panels | OpenAPI (port 16021) + External Control v2 (UDP 60222) | every panel | all | pair once (button on the controller) |
+
+All of it stays in your local network. No device needs your account password;
+Nanoleaf hands out a token when you pair, which is stored in the config file.
+
+**Notes per device**
+
+- **OpenRGB** talks to the hardware directly. If the vendor's own software
+  (Corsair iCUE, Razer Synapse, Logitech G Hub, …) runs at the same time,
+  both fight over the LEDs – quit it for the devices you drive through
+  OpenRGB. Each OpenRGB controller is its own device in the app. OpenRGB on
+  another computer: *Add by address* → OpenRGB → `host:6742`.
+- **Razer Chroma** shows only the most recently started app, so all Razer
+  hardware is one device in the app: its “LEDs” are columns from left to
+  right, spread over keyboard (22 columns), mouse, mouse pad, headset, keypad
+  and *Chroma Link* (which also reaches *Chroma Connect* devices of other
+  vendors). Put its zone along the bottom edge of the screen for a gradient
+  across the desk.
+- **Govee** has no official per-segment API. The app uses the realtime mode
+  that Govee's own PC app uses for screen sync (community-documented); the
+  official LAN API only knows one colour per device. Set the segment count of
+  your model on the device card (manual / Govee app). Windows asks once to let
+  the app receive on the network – that is the Govee scan reply (UDP 4002).
+- **Nanoleaf** panels are ordered left to right (top to bottom for tall
+  layouts). Pairing: hold the power button on the controller for 5–7 s until
+  the LEDs flash, then click *Pair* on the device card within 30 s.
+
+**Not supported, and why**
+
+- **Corsair iCUE SDK** – technically fine, but the SDK is published under a
+  proprietary Corsair licence that forbids combining it with other software
+  and does not allow redistributing it. That cannot be reconciled with this
+  app's GPL-3.0 licence. Corsair hardware works through **OpenRGB** instead
+  (with iCUE closed).
+- **Logitech G Hub, SteelSeries GG, ASUS Aura, MSI, Gigabyte** – use OpenRGB,
+  which covers this hardware directly.
+- **Philips Hue, LIFX, Twinkly** – planned; they need a paired bridge or
+  vendor-specific streaming and real hardware for testing.
+- **Tuya / Smart Life, WiZ, Yeelight, Magic Home** – single-colour, slow
+  protocols (or cloud-only keys) that cannot follow a picture.
 
 ## Install
 
@@ -74,14 +127,15 @@ is not notarised, macOS says the app “cannot be checked”: right-click the ap
 
 1. **Prepare WLED.** Any recent WLED works out of the box: realtime UDP is
    on by default (*Config → Sync Interfaces → Realtime*). Set the LED count and
-   the power limit (ABL) there as usual.
+   the power limit (ABL) there as usual. Other devices: see *Setup once* in
+   [Supported devices](#supported-devices).
 2. **Start WLED Ambilight.** The network is searched automatically; click
    **+** next to a device. It gets one zone with all its LEDs on a free
    screen edge.
 3. **Place the zones.** For a strip running around the screen select its
    zone and click **Split to 4 edges**. Check the direction: the small chevron
    in each zone marks LED 0. If the light runs the wrong way, switch on
-   **Strip runs backwards** for the device.
+   **Reverse order** for the device.
 4. **Tune the picture** on the *Picture* tab. Settings are saved automatically.
 
 ## Concepts
@@ -94,7 +148,7 @@ is not notarised, macOS says the app “cannot be checked”: right-click the ap
   per LED, and each cell is averaged.
 - **Horizontal / vertical** – horizontal zones run left → right, vertical
   zones top → bottom. A strip that is wired the other way round is fixed per
-  device with **Strip runs backwards** (this mirrors the whole strip, including
+  device with **Reverse order** (this mirrors the whole strip, including
   the order of split zones).
 - **Capture resolution** – the screen is scaled down to a small buffer
   (default 320 px wide). That is the precision of the zones; higher values
@@ -167,6 +221,8 @@ Everything is saved automatically as JSON:
 
 All zone coordinates are normalised (0…1) relative to the captured screen, so
 the file can be copied between machines. The file is written atomically.
+It contains the Nanoleaf pairing token (which only grants access to that one
+device in your network), so don't post it publicly.
 
 ## How it works
 
@@ -184,12 +240,17 @@ the file can be copied between machines. The file is written atomically.
               gamma, saturation, brightness, BGR, reverse
                                  │
                                  ▼
-                 DDP / DRGB over UDP ──► WLED devices
+      one output per device, each in its own thread (except WLED)
+                                 │
+   WLED (DDP/DRGB) · OpenRGB (TCP) · Razer (HTTP) · Govee (UDP) · Nanoleaf (UDP)
 ```
 
 The pipeline runs in its own thread on a fixed tick that is a multiple of the
 target rate, so per-device caps land on exact values and the UI can never
-slow the LEDs down. New frames are sampled once; ticks in between only
+slow the LEDs down. Devices that need TCP/HTTP or a handshake run in their
+own thread, receive only the newest frame and reconnect by themselves, so an
+unreachable device never holds up the others. On exit every session is closed
+(Razer session ended, Govee realtime mode switched off). New frames are sampled once; ticks in between only
 advance the smoothing, which keeps fades fluid.
 
 On Linux the window freezes its preview while it is not focused, because the
@@ -200,11 +261,16 @@ macOS the window is excluded from the capture instead.
 
 | Problem | Fix |
 | --- | --- |
-| No device found | Same network/VLAN? Firewalls must allow outgoing UDP and mDNS. Add the device by IP. |
+| No device found | Same network/VLAN? Firewalls must allow UDP and mDNS. Add the device by address. |
 | LEDs flicker | Raise *Temporal smoothing* or lower *Max. change per second*; check the power supply and ABL limit in WLED. |
-| Colours run the wrong way | *Strip runs backwards* on the device card. |
+| Colours run the wrong way | *Reverse order* on the device card. |
 | Red and blue swapped | *Swap red and blue (BGR)*, or set the colour order in WLED's LED settings. |
 | WLED shows its own effect again | The app sends continuously, also while paused; check that *Realtime* is enabled in WLED and that the device is active here. |
+| OpenRGB: “not reachable” | Start OpenRGB and switch on *SDK Server* (port 6742). Quit the vendor software of the device. |
+| OpenRGB: device flickers between two colours | The vendor software (iCUE, Synapse, G Hub …) is still running for that device. |
+| Razer: “Synapse not reachable” | Synapse must run and you must be logged in; turn on *Chroma Apps* in Synapse. |
+| Govee not found / stays dark | Turn on *LAN Control* in the Govee Home app; allow the app in the firewall (UDP 4002); check the segment count. |
+| Nanoleaf: “not in pairing mode” | Hold the power button on the controller for 5–7 s until the LEDs flash, then click *Pair* within 30 s. |
 | Linux: “gst-launch-1.0 not found” | Install GStreamer and its PipeWire plugin (see *Install*), or use the Flatpak. |
 | Linux: wrong monitor | *App → Choose another display* asks the portal again. |
 | macOS: black preview / error | Grant *Screen Recording* permission and restart the app (macOS rule). After an update an unsigned build may need the permission again. |

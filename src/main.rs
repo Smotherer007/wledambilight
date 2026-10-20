@@ -14,9 +14,11 @@
 mod app;
 mod capture;
 mod config;
+mod discovery;
 mod engine;
 mod i18n;
 mod icons;
+mod output;
 mod sampler;
 mod theme;
 mod tray;

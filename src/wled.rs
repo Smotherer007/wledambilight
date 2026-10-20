@@ -89,94 +89,80 @@ pub fn local_ip() -> Option<IpAddr> {
     Some(sock.local_addr().ok()?.ip())
 }
 
-pub struct Scan {
-    pub found: Arc<Mutex<Vec<WledInfo>>>,
-    pub done: Arc<Mutex<bool>>,
+/// Probe every address of the local /24 subnet for WLED (48 at a time).
+/// Finds devices that do not announce themselves via mDNS.
+pub fn sweep(on_found: impl Fn(WledInfo) + Send + Sync + 'static) {
+    let Some(IpAddr::V4(v4)) = local_ip() else {
+        return;
+    };
+    let o = v4.octets();
+    let hosts: Vec<String> = (1..=254)
+        .filter(|last| *last != o[3])
+        .map(|last| format!("{}.{}.{}.{}", o[0], o[1], o[2], last))
+        .collect();
+    let queue = Arc::new(Mutex::new(hosts));
+    let on_found = Arc::new(on_found);
+    let mut handles = Vec::new();
+    for _ in 0..48 {
+        let queue = queue.clone();
+        let on_found = on_found.clone();
+        handles.push(std::thread::spawn(move || loop {
+            let Some(host) = queue.lock().unwrap().pop() else {
+                break;
+            };
+            if let Some(info) = probe(&host, Duration::from_millis(350)) {
+                on_found(info);
+            }
+        }));
+    }
+    for h in handles {
+        let _ = h.join();
+    }
 }
 
-/// One search that does both: mDNS lookup first (instant, finds devices that
-/// announce themselves), then the subnet sweep for everything else.
-pub fn search() -> Scan {
-    let found: Arc<Mutex<Vec<WledInfo>>> = Arc::new(Mutex::new(Vec::new()));
-    let done = Arc::new(Mutex::new(false));
-    let f = found.clone();
-    let d = done.clone();
-    std::thread::spawn(move || {
-        for host in mdns_hosts(Duration::from_millis(1500)) {
-            if let Some(info) = probe(&host, Duration::from_millis(600)) {
-                let mut v = f.lock().unwrap();
-                if !v.iter().any(|x| x.host == info.host) {
-                    v.push(info);
-                }
-            }
-        }
-        if let Some(IpAddr::V4(v4)) = local_ip() {
-            let o = v4.octets();
-            let hosts: Vec<String> = (1..=254)
-                .filter(|last| *last != o[3])
-                .map(|last| format!("{}.{}.{}.{}", o[0], o[1], o[2], last))
-                .collect();
-            let queue = Arc::new(Mutex::new(hosts));
-            let mut handles = Vec::new();
-            for _ in 0..48 {
-                let queue = queue.clone();
-                let f = f.clone();
-                handles.push(std::thread::spawn(move || loop {
-                    let host = {
-                        let mut q = queue.lock().unwrap();
-                        match q.pop() {
-                            Some(h) => h,
-                            None => break,
-                        }
-                    };
-                    if let Some(info) = probe(&host, Duration::from_millis(350)) {
-                        let mut v = f.lock().unwrap();
-                        if !v.iter().any(|x| x.host == info.host) {
-                            v.push(info);
-                        }
-                    }
-                }));
-            }
-            for h in handles {
-                let _ = h.join();
-            }
-        }
-        *d.lock().unwrap() = true;
-    });
-    Scan { found, done }
-}
-
-/// mDNS discovery of `_wled._tcp` (pure Rust, works on every OS).
-/// Listens for `wait` and returns the IPv4 addresses that answered.
-pub fn mdns_hosts(wait: Duration) -> Vec<String> {
+/// mDNS browse for several service types at once (pure Rust, every OS).
+/// Returns (service type, IPv4 address, instance name) for `wait`.
+pub fn mdns(services: &[&str], wait: Duration) -> Vec<(String, String, String)> {
     let Ok(daemon) = mdns_sd::ServiceDaemon::new() else {
         return Vec::new();
     };
-    let Ok(rx) = daemon.browse("_wled._tcp.local.") else {
-        let _ = daemon.shutdown();
-        return Vec::new();
-    };
+    let receivers: Vec<_> = services
+        .iter()
+        .filter_map(|s| daemon.browse(s).ok().map(|rx| (s.to_string(), rx)))
+        .collect();
     let deadline = Instant::now() + wait;
-    let mut hosts = Vec::new();
-    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-        match rx.recv_timeout(left) {
-            Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
-                for addr in info.addresses.iter() {
-                    let ip = addr.to_ip_addr();
-                    if ip.is_ipv4() {
-                        hosts.push(ip.to_string());
+    let mut out: Vec<(String, String, String)> = Vec::new();
+    while Instant::now() < deadline {
+        let mut idle = true;
+        for (service, rx) in &receivers {
+            while let Ok(ev) = rx.try_recv() {
+                idle = false;
+                if let mdns_sd::ServiceEvent::ServiceResolved(info) = ev {
+                    let instance = info
+                        .fullname
+                        .strip_suffix(&format!(".{service}"))
+                        .unwrap_or(&info.fullname)
+                        .to_string();
+                    for addr in info.addresses.iter() {
+                        let ip = addr.to_ip_addr();
+                        if ip.is_ipv4() {
+                            out.push((service.clone(), ip.to_string(), instance.clone()));
+                        }
                     }
                 }
             }
-            Ok(_) => {}
-            Err(_) => break,
+        }
+        if idle {
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
-    let _ = daemon.stop_browse("_wled._tcp.local.");
+    for s in services {
+        let _ = daemon.stop_browse(s);
+    }
     let _ = daemon.shutdown();
-    hosts.sort();
-    hosts.dedup();
-    hosts
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Probe one host in the background (manual "add by address").

@@ -34,10 +34,11 @@
   <key>NSHumanReadableCopyright</key>
   <string>© 2026 Patrick Weppelmann · GPL-3.0</string>
   <key>NSLocalNetworkUsageDescription</key>
-  <string>WLED Ambilight finds WLED devices on your network and sends them the screen colours.</string>
+  <string>WLED Ambilight finds WLED, Govee and Nanoleaf devices on your network and sends them the screen colours.</string>
   <key>NSBonjourServices</key>
   <array>
     <string>_wled._tcp</string>
+    <string>_nanoleafapi._tcp</string>
   </array>
 </dict>
 </plist>

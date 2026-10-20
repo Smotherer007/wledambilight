@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::capture::SharedFrame;
-use crate::config::{Config, DeviceCfg, Protocol};
+use crate::config::{Config, DeviceCfg};
+use crate::output::{self, Output};
 use crate::sampler::{self, Plan};
-use crate::wled;
 
 pub struct Engine {
     pub plan: Plan,
@@ -30,7 +30,8 @@ pub struct Engine {
     history_pos: usize,
     /// last colours that went out, for the LED preview
     pub last: Vec<Vec<[u8; 3]>>,
-    senders: HashMap<String, (String, Protocol, wled::Sender)>,
+    /// one output per device id, with the connection key it was opened for
+    outputs: HashMap<String, (String, Box<dyn Output>)>,
     /// frames sent per device (index = device index)
     sent: Vec<u64>,
     /// update rate of the fastest device
@@ -102,7 +103,7 @@ impl Engine {
             history: Vec::new(),
             history_pos: 0,
             last: Vec::new(),
-            senders: HashMap::new(),
+            outputs: HashMap::new(),
             sent: Vec::new(),
             send_fps: 0.0,
             fps_window: (Instant::now(), Vec::new()),
@@ -117,25 +118,21 @@ impl Engine {
         }
     }
 
-    /// Send `colors` to `dev`, (re)creating the socket when host or protocol changed.
+    /// Send `colors` to `dev`, (re)opening the output when its connection
+    /// settings changed.
     fn send(&mut self, di: usize, dev: &DeviceCfg, colors: &[[u8; 3]]) {
+        let key = dev.connection_key();
         let stale = self
-            .senders
+            .outputs
             .get(&dev.id)
-            .map(|(h, p, _)| h != &dev.host || *p != dev.protocol)
+            .map(|(k, _)| k != &key)
             .unwrap_or(true);
         if stale {
-            self.senders.insert(
-                dev.id.clone(),
-                (
-                    dev.host.clone(),
-                    dev.protocol,
-                    wled::Sender::new(&dev.host, dev.protocol),
-                ),
-            );
+            self.outputs
+                .insert(dev.id.clone(), (key, output::open(dev)));
         }
-        if let Some((_, _, sender)) = self.senders.get_mut(&dev.id) {
-            sender.send(colors);
+        if let Some((_, out)) = self.outputs.get_mut(&dev.id) {
+            out.send(colors);
         }
         if self.sent.len() <= di {
             self.sent.resize(di + 1, 0);
@@ -199,7 +196,34 @@ impl Engine {
         self.raw = fresh;
     }
 
+    /// Connection state of every open output, by device id.
+    pub fn statuses(&self) -> HashMap<String, output::Status> {
+        self.outputs
+            .iter()
+            .map(|(id, (_, o))| (id.clone(), o.status()))
+            .collect()
+    }
+
+    /// Close every output and wait briefly, so sessions end cleanly (Razer
+    /// session closed, Govee/Nanoleaf handed back) when the app quits.
+    pub fn shutdown(&mut self) {
+        for (_, out) in self.outputs.values_mut() {
+            out.shutdown(Duration::from_millis(800));
+        }
+        self.outputs.clear();
+    }
+
+    /// Close outputs of devices that were removed or switched off (ends
+    /// sessions such as Razer Chroma, gives Govee/Nanoleaf back to their app).
+    fn prune(&mut self, cfg: &Config) {
+        if self.outputs.len() > cfg.devices.iter().filter(|d| d.enabled).count() {
+            self.outputs
+                .retain(|id, _| cfg.devices.iter().any(|d| d.enabled && &d.id == id));
+        }
+    }
+
     pub fn tick(&mut self, cfg: &Config, frame: Option<&SharedFrame>, dt: f32) {
+        self.prune(cfg);
         let (w, h) = frame
             .map(|f| (f.w.max(1), f.h.max(1)))
             .unwrap_or((self.plan_w, self.plan_h));

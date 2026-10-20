@@ -34,6 +34,8 @@ commit messages (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ### Features
 
+- Five device types in one setup: WLED, OpenRGB, Razer Chroma, Govee and Nanoleaf, each with its own output driver and reconnect handling
+- One search finds every device kind (mDNS, subnet sweep, Govee LAN scan, local OpenRGB and Synapse); Nanoleaf pairing included
 - Windows (Windows Graphics Capture) and macOS (ScreenCaptureKit) support next to Linux; on both the app's own window is left out of the capture
 - Native tray icon on Windows and macOS, monitor selection on both
 - Redesigned interface: light spill around the preview, inspector with tabs, switches and segmented controls, empty states, embedded Inter font, new app icon

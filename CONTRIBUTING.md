@@ -23,7 +23,9 @@ cargo fmt
 | `src/engine.rs` | median, smoothing, grading, per-device rate limits, sending |
 | `src/sampler.rs` | zones → pixel cells → mean colours |
 | `src/capture/` | one backend per OS (`linux.rs`, `windows.rs`, `macos.rs`), `scale.rs` downscaler, `demo.rs` |
-| `src/wled.rs` | discovery (mDNS + subnet), `/json/info`, DDP and DRGB senders |
+| `src/wled.rs` | WLED: `/json/info`, DDP and DRGB senders, mDNS and subnet sweep helpers |
+| `src/output/` | one output per device: `mod.rs` (threaded driver with reconnect), `openrgb.rs`, `razer.rs`, `govee.rs`, `nanoleaf.rs` |
+| `src/discovery.rs` | “Search the network” for every device kind |
 | `src/tray/` | tray icon: `ksni` on Linux, `tray-icon` on Windows/macOS |
 | `src/config.rs` | config file, migration of old fields, atomic save |
 | `assets/` | `icon.svg` (source of all icons), rendered icons, Inter font |
@@ -32,6 +34,22 @@ cargo fmt
 
 Windows and macOS code is only compiled on those systems; CI builds and tests
 all three on every push and pull request.
+
+### Adding a device type
+
+1. Add a variant to `DeviceKind` (`src/config.rs`).
+2. Write a `Driver` in `src/output/<name>.rs`: `connect`, `write` (one frame),
+   optionally `keepalive` (called about once per second) and `close`. Run it
+   through `Threaded::spawn` in `output::open` – reconnecting, frame dropping
+   and status reporting come for free.
+3. Find the devices in `src/discovery.rs` and map them to a `Found`.
+4. Device-specific settings go into the device card in `src/app.rs`.
+5. Unit-test the packet format; a fake server in the test (see `openrgb.rs`)
+   covers the whole driver.
+
+Only add protocols whose licence fits GPL-3.0 (open protocols, documented
+network APIs). Vendor SDKs that must be linked under a proprietary licence
+(e.g. Corsair iCUE) cannot be included.
 
 ### Icons
 
