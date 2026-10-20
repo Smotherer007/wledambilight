@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Patrick Weppelmann -->
+<component type="desktop-application">
+  <id>io.github.smotherer007.WledAmbilight</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+
+  <name>WLED Ambilight</name>
+  <summary>Send the colours of your screen to WLED LED strips</summary>
+  <summary xml:lang="de">Bildschirmfarben an WLED-LED-Streifen senden</summary>
+
+  <developer id="io.github.smotherer007">
+    <name>Patrick Weppelmann</name>
+  </developer>
+
+  <description>
+    <p>
+      WLED Ambilight captures your screen, averages freely placed zones and
+      streams the colours to one or more WLED devices in real time – the glow
+      behind your monitor follows the picture.
+    </p>
+    <p xml:lang="de">
+      WLED Ambilight nimmt den Bildschirm auf, mittelt frei platzierbare Zonen
+      und schickt die Farben in Echtzeit an ein oder mehrere WLED-Geräte – das
+      Licht hinter dem Monitor folgt dem Bild.
+    </p>
+    <ul>
+      <li>Finds WLED devices on the network automatically (mDNS and subnet scan)</li>
+      <li>Zones are placed and resized with the mouse, independent of resolution</li>
+      <li>Any number of LEDs per device via DDP, DRGB for older firmware</li>
+      <li>Temporal and spatial smoothing, median filter, brightness, gamma and saturation</li>
+      <li>Per-device frame rate limit, reversed strips and BGR clones</li>
+      <li>Runs in the tray or headless for autostart</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.smotherer007.WledAmbilight.desktop</launchable>
+  <icon type="stock">io.github.smotherer007.WledAmbilight</icon>
+
+  <url type="homepage">https://github.com/Smotherer007/wledambilight</url>
+  <url type="bugtracker">https://github.com/Smotherer007/wledambilight/issues</url>
+  <url type="vcs-browser">https://github.com/Smotherer007/wledambilight</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Zones on the screen preview with the light they produce</caption>
+      <image>https://raw.githubusercontent.com/Smotherer007/wledambilight/main/docs/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>WLED</keyword>
+    <keyword>Ambilight</keyword>
+    <keyword>LED</keyword>
+    <keyword>DDP</keyword>
+  </keywords>
+
+  <requires>
+    <display_length compare="ge">1024</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-10-20"><!-- x-release-please-version -->
+      <description>
+        <p>First public release: Linux, Windows and macOS.</p>
+      </description>
+    </release>
+  </releases>
+</component>

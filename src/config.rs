@@ -1,18 +1,26 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Patrick Weppelmann
+
+//! Persistent configuration: devices, zones and global settings.
+//!
+//! Stored as pretty JSON in the platform config directory:
+//! - Linux:   `$XDG_CONFIG_HOME/wled-ambilight/config.json` (usually `~/.config/…`)
+//! - macOS:   `~/Library/Application Support/wled-ambilight/config.json`
+//! - Windows: `%APPDATA%\wled-ambilight\config.json`
+//!
+//! `--config <file>` overrides the location.
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Protocol {
     /// DDP on UDP 4048 - best for many LEDs, what WLED prefers for realtime.
+    #[default]
     Ddp,
-    /// WLED UDP realtime protocol (DRGB) on UDP 21324, limited to ~490 LEDs/packet.
+    /// WLED UDP realtime protocol (DRGB) on UDP 21324, limited to 490 LEDs.
     Drgb,
-}
-
-impl Default for Protocol {
-    fn default() -> Self {
-        Protocol::Ddp
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -81,6 +89,7 @@ impl Zone {
             ZonePreset::Bottom => ("Bottom", 0.0, 0.90, 1.0, 0.10, false),
             ZonePreset::Left => ("Left", 0.0, 0.0, 0.10, 1.0, true),
             ZonePreset::Right => ("Right", 0.90, 0.0, 0.10, 1.0, true),
+            ZonePreset::Full => ("Full", 0.0, 0.0, 1.0, 1.0, false),
             ZonePreset::Custom => ("Zone", 0.25, 0.25, 0.5, 0.25, false),
         };
         Self {
@@ -98,8 +107,6 @@ impl Zone {
             color,
         }
     }
-
-
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +115,9 @@ pub enum ZonePreset {
     Bottom,
     Left,
     Right,
+    /// whole picture (used by tests and the sampler checks)
+    #[allow(dead_code)]
+    Full,
     Custom,
 }
 
@@ -129,9 +139,13 @@ pub struct Settings {
     pub gamma: f32,
     pub saturation: f32,
     pub brightness: f32,
-    /// portal restore token so the screen capture starts without a dialog
+    /// Linux only: portal restore token so the capture starts without a dialog
     pub restore_token: Option<String>,
     pub snap: bool,
+    /// Windows/macOS: index of the captured monitor (0 = primary)
+    pub monitor: usize,
+    /// "auto", "de" or "en"
+    pub language: String,
 }
 
 impl Default for Settings {
@@ -148,6 +162,8 @@ impl Default for Settings {
             brightness: 1.0,
             restore_token: None,
             snap: true,
+            monitor: 0,
+            language: "auto".into(),
         }
     }
 }
@@ -160,14 +176,23 @@ pub struct Config {
     pub settings: Settings,
 }
 
+static PATH_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Use a different config file (`--config <file>`). Call before anything loads.
+pub fn set_config_path(path: PathBuf) {
+    let _ = PATH_OVERRIDE.set(path);
+}
+
 pub fn config_path() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".config")
-        });
-    base.join("wled-ambilight").join("config.json")
+    if let Some(p) = PATH_OVERRIDE.get() {
+        return p.clone();
+    }
+    // dirs::config_dir() is $XDG_CONFIG_HOME or ~/.config on Linux, so existing
+    // installations keep their file.
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("wled-ambilight")
+        .join("config.json")
 }
 
 impl Config {
@@ -182,7 +207,7 @@ impl Config {
         }
     }
 
-    fn from_json(text: &str) -> Result<Self, serde_json::Error> {
+    pub fn from_json(text: &str) -> Result<Self, serde_json::Error> {
         let mut v: serde_json::Value = serde_json::from_str(text)?;
         // Zones used to carry flip_h/flip_v. A reversed strip is a property of the
         // device, so fold the old flags into it (safe for the one-zone case).
@@ -206,7 +231,11 @@ impl Config {
         }
         if let Some(devices) = v.get_mut("devices").and_then(|d| d.as_array_mut()) {
             for d in devices {
-                let id = d.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                let id = d
+                    .get("id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if flip_devices.contains(&id) {
                     d["reverse"] = serde_json::Value::Bool(true);
                 }
@@ -215,26 +244,28 @@ impl Config {
         serde_json::from_value(v)
     }
 
+    /// Write the config atomically (temp file + rename), so a crash or a full
+    /// disk can never leave a half written file behind.
     pub fn save(&self) {
         let path = config_path();
+        if let Err(e) = self.save_to(&path) {
+            eprintln!("could not write {}: {e}", path.display());
+        }
+    }
+
+    pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
         if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+            std::fs::create_dir_all(dir)?;
         }
-        match serde_json::to_string_pretty(self) {
-            Ok(text) => {
-                if let Err(e) = std::fs::write(&path, text) {
-                    eprintln!("could not write {}: {e}", path.display());
-                }
-            }
-            Err(e) => eprintln!("could not serialise config: {e}"),
-        }
+        let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, path)
     }
 
     pub fn device(&self, id: &str) -> Option<&DeviceCfg> {
         self.devices.iter().find(|d| d.id == id)
     }
-
-
 
     /// Which LEDs of which device every zone drives, in config order.
     /// This is exactly the packing the sampler uses.
@@ -263,5 +294,50 @@ impl Config {
             .filter(|(i, z)| z.device == device_id && z.enabled && Some(*i) != skip)
             .map(|(_, z)| z.count)
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_zone_flip_flags_move_to_the_device() {
+        let json = r#"{
+            "devices": [{"id":"a","name":"A","host":"a","led_count":10,"enabled":true,
+                         "protocol":"Ddp","brightness":1.0,"reverse":false,"bgr":false}],
+            "zones": [{"name":"Z","device":"a","x":0,"y":0,"w":1,"h":0.1,"count":10,
+                       "vertical":false,"gain":1,"enabled":true,"offset":null,
+                       "color":[1,2,3],"flip_h":true}]
+        }"#;
+        let cfg = Config::from_json(json).unwrap();
+        assert!(cfg.devices[0].reverse);
+        assert_eq!(cfg.devices[0].max_fps, 0);
+        assert_eq!(cfg.settings.language, "auto");
+    }
+
+    #[test]
+    fn zones_pack_after_each_other() {
+        let mut cfg = Config::default();
+        cfg.devices.push(DeviceCfg::new("h", "d", 100));
+        for kind in [ZonePreset::Top, ZonePreset::Right] {
+            cfg.zones
+                .push(Zone::preset(kind, "h".into(), 30, [0, 0, 0]));
+        }
+        assert_eq!(cfg.zone_ranges(), vec![(0, 30), (30, 60)]);
+        assert_eq!(cfg.used_leds("h", None), 60);
+        assert_eq!(cfg.used_leds("h", Some(0)), 30);
+    }
+
+    #[test]
+    fn save_and_load_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("wled-ambilight-test-{}", std::process::id()));
+        let path = dir.join("config.json");
+        let mut cfg = Config::default();
+        cfg.devices.push(DeviceCfg::new("10.0.0.2", "Desk", 42));
+        cfg.save_to(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(Config::from_json(&text).unwrap(), cfg);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

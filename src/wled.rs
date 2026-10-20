@@ -1,8 +1,13 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Patrick Weppelmann
+
+//! Talking to WLED: discovery (mDNS + subnet sweep), `/json/info` probing and
+//! the two realtime protocols (DDP and DRGB).
+
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
-
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::Protocol;
 
@@ -39,11 +44,8 @@ fn http_get(host: &str, path: &str, timeout: Duration) -> Option<String> {
         }
     }
     let text = String::from_utf8_lossy(&buf).to_string();
-    let body = match text.find("\r\n\r\n") {
-        Some(i) => text[i + 4..].to_string(),
-        None => return None,
-    };
-    Some(body)
+    let i = text.find("\r\n\r\n")?;
+    Some(text[i + 4..].to_string())
 }
 
 /// Ask a single WLED device for its JSON info.
@@ -100,7 +102,7 @@ pub fn search() -> Scan {
     let f = found.clone();
     let d = done.clone();
     std::thread::spawn(move || {
-        for host in mdns_hosts() {
+        for host in mdns_hosts(Duration::from_millis(1500)) {
             if let Some(info) = probe(&host, Duration::from_millis(600)) {
                 let mut v = f.lock().unwrap();
                 if !v.iter().any(|x| x.host == info.host) {
@@ -144,31 +146,57 @@ pub fn search() -> Scan {
     Scan { found, done }
 }
 
-/// mDNS discovery through avahi, if it is installed.
-pub fn mdns_hosts() -> Vec<String> {
-    let Ok(out) = std::process::Command::new("avahi-browse")
-        .args(["-tpr", "_wled._tcp"])
-        .output()
-    else {
+/// mDNS discovery of `_wled._tcp` (pure Rust, works on every OS).
+/// Listens for `wait` and returns the IPv4 addresses that answered.
+pub fn mdns_hosts(wait: Duration) -> Vec<String> {
+    let Ok(daemon) = mdns_sd::ServiceDaemon::new() else {
         return Vec::new();
     };
-    let text = String::from_utf8_lossy(&out.stdout);
+    let Ok(rx) = daemon.browse("_wled._tcp.local.") else {
+        let _ = daemon.shutdown();
+        return Vec::new();
+    };
+    let deadline = Instant::now() + wait;
     let mut hosts = Vec::new();
-    for line in text.lines() {
-        let parts: Vec<&str> = line.split(';').collect();
-        // +;iface;proto;name;type;domain;hostname;address;port;txt
-        if parts.len() > 8 && parts[0] == "=" {
-            hosts.push(parts[8].to_string());
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match rx.recv_timeout(left) {
+            Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
+                for addr in info.addresses.iter() {
+                    let ip = addr.to_ip_addr();
+                    if ip.is_ipv4() {
+                        hosts.push(ip.to_string());
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
         }
     }
+    let _ = daemon.stop_browse("_wled._tcp.local.");
+    let _ = daemon.shutdown();
     hosts.sort();
     hosts.dedup();
     hosts
 }
 
+/// Probe one host in the background (manual "add by address").
+pub fn probe_in_background(host: String) -> Arc<Mutex<Option<Result<WledInfo, String>>>> {
+    let out = Arc::new(Mutex::new(None));
+    let o = out.clone();
+    std::thread::spawn(move || {
+        let host = host
+            .trim()
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string();
+        let res = probe(&host, Duration::from_millis(1500)).ok_or(host);
+        *o.lock().unwrap() = Some(res);
+    });
+    out
+}
+
 pub struct DdpSender {
     sock: UdpSocket,
-    addr: SocketAddr,
     seq: u8,
 }
 
@@ -178,7 +206,7 @@ impl DdpSender {
         let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
         sock.connect(addr).ok()?;
         sock.set_nonblocking(true).ok()?;
-        Some(Self { sock, addr, seq: 0 })
+        Some(Self { sock, seq: 0 })
     }
 
     pub fn send(&mut self, colors: &[[u8; 3]]) {
@@ -187,9 +215,13 @@ impl DdpSender {
         let mut offset = 0usize;
         while offset < colors.len() {
             let n = (colors.len() - offset).min(CHUNK);
+            let last = offset + n >= colors.len();
             let mut pkt = Vec::with_capacity(10 + n * 3);
-            pkt.push(0x41); // push + version 1
-            pkt.push(self.seq & 0x0F);
+            // version 1; PUSH only on the last packet so WLED shows the whole
+            // frame at once instead of tearing at every 480-LED boundary
+            pkt.push(if last { 0x41 } else { 0x40 });
+            // sequence 1..=15 (0 means "unused" in DDP)
+            pkt.push((self.seq % 15) + 1);
             pkt.push(0x0B); // RGB24
             pkt.push(0x01); // destination id
             pkt.extend_from_slice(&((offset as u32) * 3).to_be_bytes());
@@ -201,13 +233,11 @@ impl DdpSender {
             offset += n;
         }
         self.seq = self.seq.wrapping_add(1);
-        let _ = self.addr;
     }
 }
 
 pub struct DrgbSender {
     sock: UdpSocket,
-    addr: SocketAddr,
 }
 
 impl DrgbSender {
@@ -216,20 +246,22 @@ impl DrgbSender {
         let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
         sock.connect(addr).ok()?;
         sock.set_nonblocking(true).ok()?;
-        Some(Self { sock, addr })
+        Some(Self { sock })
     }
 
     pub fn send(&mut self, colors: &[[u8; 3]]) {
         let mut pkt = Vec::with_capacity(6 + colors.len() * 3);
         pkt.extend_from_slice(b"DRGB");
-        pkt.push(2); // timeout in seconds
-        for c in colors.iter().take(490) {
+        pkt.push(2); // seconds until WLED falls back to its own effect
+        for c in colors.iter().take(DRGB_MAX) {
             pkt.extend_from_slice(c);
         }
         let _ = self.sock.send(&pkt);
-        let _ = self.addr;
     }
 }
+
+/// DRGB fits 490 LEDs into one datagram.
+pub const DRGB_MAX: usize = 490;
 
 pub struct Sender {
     host: String,
@@ -270,4 +302,43 @@ impl Sender {
     }
 }
 
+/// Build the DDP datagrams for one frame (exposed for tests).
+#[cfg(test)]
+fn ddp_packets(colors: &[[u8; 3]]) -> Vec<Vec<u8>> {
+    let sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = sock.local_addr().unwrap().port();
+    sock.set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let mut tx = DdpSender::new("127.0.0.1").unwrap();
+    // DdpSender targets port 4048; point it at our test socket instead
+    tx.sock.connect(("127.0.0.1", port)).unwrap();
+    tx.send(colors);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 2048];
+    while let Ok(n) = sock.recv(&mut buf) {
+        out.push(buf[..n].to_vec());
+    }
+    out
+}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ddp_splits_and_pushes_only_the_last_packet() {
+        let colors = vec![[1u8, 2, 3]; 1000];
+        let pkts = ddp_packets(&colors);
+        assert_eq!(pkts.len(), 3);
+        assert_eq!(pkts[0][0], 0x40);
+        assert_eq!(pkts[1][0], 0x40);
+        assert_eq!(pkts[2][0], 0x41);
+        // offsets in bytes: 0, 1440, 2880
+        let off = |p: &Vec<u8>| u32::from_be_bytes([p[4], p[5], p[6], p[7]]);
+        assert_eq!(off(&pkts[0]), 0);
+        assert_eq!(off(&pkts[1]), 480 * 3);
+        assert_eq!(off(&pkts[2]), 960 * 3);
+        assert_eq!(u16::from_be_bytes([pkts[2][8], pkts[2][9]]), 40 * 3);
+        assert!(pkts.iter().all(|p| (1..=15).contains(&p[1])));
+    }
+}

@@ -1,3 +1,10 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Patrick Weppelmann
+
+//! Turns the normalised zone layout into pixel cells and averages them.
+
+use std::hash::{Hash, Hasher};
+
 use crate::config::Config;
 
 #[derive(Debug, Clone, Copy)]
@@ -26,6 +33,30 @@ pub struct DevicePlan {
 pub struct Plan {
     pub w: u32,
     pub devices: Vec<DevicePlan>,
+    /// `layout_hash` of the config this plan was built from
+    pub layout: u64,
+}
+
+/// Hash of everything that changes which pixels feed which LED. Cheap enough
+/// to compare on every tick, so zone edits apply immediately.
+pub fn layout_hash(cfg: &Config) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for d in &cfg.devices {
+        d.id.hash(&mut h);
+        d.enabled.hash(&mut h);
+        d.led_count.hash(&mut h);
+    }
+    for z in &cfg.zones {
+        z.device.hash(&mut h);
+        z.enabled.hash(&mut h);
+        z.vertical.hash(&mut h);
+        z.count.hash(&mut h);
+        z.offset.hash(&mut h);
+        for f in [z.x, z.y, z.w, z.h, z.gain] {
+            f.to_bits().hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 /// Turn the normalised zone layout into concrete screen cells for the current
@@ -36,17 +67,13 @@ pub fn build(cfg: &Config, w: u32, h: u32) -> Plan {
         let mut groups: Vec<ZoneGroup> = Vec::new();
         let mut gains = vec![0.0f32; dev.led_count as usize];
         let mut used: u32 = 0;
-        for zone in cfg
-            .zones
-            .iter()
-            .filter(|z| z.enabled && z.device == dev.id)
-        {
+        for zone in cfg.zones.iter().filter(|z| z.enabled && z.device == dev.id) {
             let x0 = ((zone.x * w as f32).floor() as i64).clamp(0, w as i64 - 1) as u32;
             let y0 = ((zone.y * h as f32).floor() as i64).clamp(0, h as i64 - 1) as u32;
-            let x1 =
-                (((zone.x + zone.w) * w as f32).ceil() as i64).clamp(x0 as i64 + 1, w as i64) as u32;
-            let y1 =
-                (((zone.y + zone.h) * h as f32).ceil() as i64).clamp(y0 as i64 + 1, h as i64) as u32;
+            let x1 = (((zone.x + zone.w) * w as f32).ceil() as i64).clamp(x0 as i64 + 1, w as i64)
+                as u32;
+            let y1 = (((zone.y + zone.h) * h as f32).ceil() as i64).clamp(y0 as i64 + 1, h as i64)
+                as u32;
             let n = zone.count.max(1) as u32;
             let start = zone.offset.map(|o| o as u32).unwrap_or(used);
             used = start + n;
@@ -87,7 +114,11 @@ pub fn build(cfg: &Config, w: u32, h: u32) -> Plan {
             led_count: dev.led_count,
         });
     }
-    Plan { w, devices }
+    Plan {
+        w,
+        devices,
+        layout: layout_hash(cfg),
+    }
 }
 
 /// Mean colour of one cell. The cell is fully covered (with a stride only for
@@ -156,9 +187,9 @@ pub fn sample(plan: &Plan, frame: &[u8], spatial: f32, out: &mut Vec<Vec<[f32; 3
                     }
                 }
             }
-            for (k, (idx, _)) in group.cells.iter().enumerate() {
+            for ((idx, _), col) in group.cells.iter().zip(cols) {
                 if let Some(slot) = buf.get_mut(*idx as usize) {
-                    *slot = cols[k];
+                    *slot = col;
                 }
             }
         }
@@ -182,12 +213,7 @@ mod tests {
     }
 
     fn zone() -> Zone {
-        let mut z = Zone::preset(crate::config::ZonePreset::Full, String::new(), 4, [0, 0, 0]);
-        z.x = 0.0;
-        z.y = 0.0;
-        z.w = 1.0;
-        z.h = 1.0;
-        z
+        Zone::preset(crate::config::ZonePreset::Full, String::new(), 4, [0, 0, 0])
     }
 
     /// left half white, right half black
@@ -226,6 +252,16 @@ mod tests {
         sample(&plan, &frame_lr(100, 10), 0.0, &mut out);
         assert_eq!(out[0][0][0] as u8, 255, "LED 0 must be white (left half)");
         assert_eq!(out[0][3][0] as u8, 0, "LED 3 must be black (right half)");
+    }
+
+    #[test]
+    fn layout_hash_tracks_zone_edits() {
+        let mut cfg = cfg_with(zone());
+        let a = layout_hash(&cfg);
+        cfg.zones[0].x = 0.5;
+        assert_ne!(a, layout_hash(&cfg));
+        cfg.zones[0].x = 0.0;
+        assert_eq!(a, layout_hash(&cfg));
     }
 
     #[test]

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=WLED Ambilight
+GenericName=Ambient lighting
+GenericName[de]=Umgebungsbeleuchtung
+Comment=Send the colours of your screen to WLED LED strips
+Comment[de]=Bildschirmfarben an WLED-LED-Streifen senden
+Exec=wled-ambilight
+Icon=io.github.smotherer007.WledAmbilight
+Terminal=false
+Categories=Utility;
+Keywords=WLED;ambilight;LED;DDP;backlight;bias lighting;
+StartupNotify=true
+StartupWMClass=io.github.smotherer007.WledAmbilight

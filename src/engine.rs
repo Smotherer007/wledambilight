@@ -1,8 +1,17 @@
+// SPDX-License-Identifier: GPL-3.0-only
+// Copyright (C) 2026 Patrick Weppelmann
+
+//! Colour pipeline: sample -> median -> smoothing -> grading -> send.
+//!
+//! `tick` runs on a fixed grid (see `worker`). New capture frames are sampled
+//! once; ticks in between only advance the smoothing, which keeps fades fluid
+//! even when the screen delivers fewer frames than the LEDs get.
+
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::capture::SharedFrame;
-use crate::config::{Config, Protocol};
+use crate::config::{Config, DeviceCfg, Protocol};
 use crate::sampler::{self, Plan};
 use crate::wled;
 
@@ -10,30 +19,36 @@ pub struct Engine {
     pub plan: Plan,
     plan_w: u32,
     plan_h: u32,
-    dirty: bool,
+    /// sequence number of the last sampled frame
+    sampled_seq: Option<u64>,
+    /// latest filtered sample per device / led
+    raw: Vec<Vec<[f32; 3]>>,
     /// smoothed values per device / led
     smoothing: Vec<Vec<[f32; 3]>>,
-    /// last three raw samples per device / led, for a median filter
+    /// last three raw samples per device / led, for the median filter
     history: Vec<Vec<[[f32; 3]; 3]>>,
+    history_pos: usize,
     /// last colours that went out, for the LED preview
     pub last: Vec<Vec<[u8; 3]>>,
-    senders: HashMap<String, wled::Sender>,
-    sender_keys: HashMap<String, (String, Protocol)>,
-    pub sent_frames: u64,
+    senders: HashMap<String, (String, Protocol, wled::Sender)>,
+    /// frames sent per device (index = device index)
+    sent: Vec<u64>,
+    /// update rate of the fastest device
     pub send_fps: f32,
-    fps_window: (Instant, u64),
+    fps_window: (Instant, Vec<u64>),
     pub last_sample_us: u128,
-    stats_on: bool,
-    stat_sum: f64,
-    stat_n: u64,
-    stat_t: Instant,
-    pub flicker: f32,
     /// last time we actually sent to a device (index = device index)
     last_sent: Vec<Instant>,
-    stat_led: Vec<f64>,
-    stat_led_n: u64,
     /// freeze the picture (own window focused, or user pressed pause)
     pub paused: bool,
+    stats: Option<Stats>,
+}
+
+/// Debug output with `AMBILIGHT_STATS=1`: how much the LEDs change per frame.
+struct Stats {
+    sum: f64,
+    n: u64,
+    t: Instant,
 }
 
 fn rgb_to_hsv(c: [f32; 3]) -> (f32, f32, f32) {
@@ -70,82 +85,154 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
     }
 }
 
+#[inline]
+fn median3(a: f32, b: f32, c: f32) -> f32 {
+    a.max(b).min(a.min(b).max(c))
+}
+
 impl Engine {
     pub fn new(cfg: &Config, w: u32, h: u32) -> Self {
         Self {
             plan: sampler::build(cfg, w.max(1), h.max(1)),
             plan_w: w.max(1),
             plan_h: h.max(1),
-            dirty: false,
+            sampled_seq: None,
+            raw: Vec::new(),
             smoothing: Vec::new(),
             history: Vec::new(),
+            history_pos: 0,
             last: Vec::new(),
             senders: HashMap::new(),
-            sender_keys: HashMap::new(),
-            sent_frames: 0,
+            sent: Vec::new(),
             send_fps: 0.0,
-            fps_window: (Instant::now(), 0),
+            fps_window: (Instant::now(), Vec::new()),
             last_sample_us: 0,
-            stats_on: std::env::var("AMBILIGHT_STATS").is_ok(),
-            stat_sum: 0.0,
-            stat_n: 0,
-            stat_t: Instant::now(),
-            flicker: 0.0,
             last_sent: Vec::new(),
-            stat_led: Vec::new(),
-            stat_led_n: 0,
             paused: false,
+            stats: std::env::var("AMBILIGHT_STATS").is_ok().then(|| Stats {
+                sum: 0.0,
+                n: 0,
+                t: Instant::now(),
+            }),
         }
     }
 
+    /// Send `colors` to `dev`, (re)creating the socket when host or protocol changed.
+    fn send(&mut self, di: usize, dev: &DeviceCfg, colors: &[[u8; 3]]) {
+        let stale = self
+            .senders
+            .get(&dev.id)
+            .map(|(h, p, _)| h != &dev.host || *p != dev.protocol)
+            .unwrap_or(true);
+        if stale {
+            self.senders.insert(
+                dev.id.clone(),
+                (
+                    dev.host.clone(),
+                    dev.protocol,
+                    wled::Sender::new(&dev.host, dev.protocol),
+                ),
+            );
+        }
+        if let Some((_, _, sender)) = self.senders.get_mut(&dev.id) {
+            sender.send(colors);
+        }
+        if self.sent.len() <= di {
+            self.sent.resize(di + 1, 0);
+        }
+        self.sent[di] += 1;
+    }
 
+    /// Is device `di` due for a packet, given its own fps cap?
+    fn due(&mut self, di: usize, dev: &DeviceCfg, target_fps: u32) -> bool {
+        if self.last_sent.len() <= di {
+            self.last_sent
+                .resize(di + 1, Instant::now() - Duration::from_secs(1));
+        }
+        let fps = if dev.max_fps > 0 {
+            dev.max_fps
+        } else {
+            target_fps.max(1)
+        };
+        let interval = 1.0 / fps as f32;
+        if self.last_sent[di].elapsed().as_secs_f32() >= interval - 0.001 {
+            self.last_sent[di] = Instant::now();
+            true
+        } else {
+            false
+        }
+    }
 
+    /// Sample a new frame and run it through the median filter.
+    fn sample(&mut self, frame: &SharedFrame, cfg: &Config) {
+        let t0 = Instant::now();
+        let mut fresh = Vec::new();
+        sampler::sample(&self.plan, &frame.data, cfg.settings.spatial, &mut fresh);
+        self.last_sample_us = t0.elapsed().as_micros();
 
+        // median of the last three samples per channel removes single-frame
+        // spikes (cursor blink, video compression noise) without real lag
+        let shape_changed = self.history.len() != fresh.len()
+            || self
+                .history
+                .iter()
+                .zip(&fresh)
+                .any(|(h, f)| h.len() != f.len());
+        if shape_changed {
+            self.history = fresh
+                .iter()
+                .map(|d| d.iter().map(|c| [*c; 3]).collect())
+                .collect();
+        }
+        self.history_pos = (self.history_pos + 1) % 3;
+        let use_median = cfg.settings.smoothing_ms > 0.0;
+        for (dh, df) in self.history.iter_mut().zip(fresh.iter_mut()) {
+            for (h, c) in dh.iter_mut().zip(df.iter_mut()) {
+                h[self.history_pos] = *c;
+                if use_median {
+                    for k in 0..3 {
+                        c[k] = median3(h[0][k], h[1][k], h[2][k]);
+                    }
+                }
+            }
+        }
+        self.raw = fresh;
+    }
 
     pub fn tick(&mut self, cfg: &Config, frame: Option<&SharedFrame>, dt: f32) {
         let (w, h) = frame
             .map(|f| (f.w.max(1), f.h.max(1)))
             .unwrap_or((self.plan_w, self.plan_h));
-        if self.dirty || w != self.plan_w || h != self.plan_h {
+        // rebuild the cell plan whenever the frame size or the zone layout changed
+        if w != self.plan_w || h != self.plan_h || self.plan.layout != sampler::layout_hash(cfg) {
             self.plan = sampler::build(cfg, w, h);
             self.plan_w = w;
             self.plan_h = h;
             self.smoothing.clear();
-            self.dirty = false;
+            self.sampled_seq = None;
         }
 
-        let s_spatial = cfg.settings.spatial;
-        let t0 = Instant::now();
-        let mut raw: Vec<Vec<[f32; 3]>> = Vec::new();
         if self.paused {
             // keep the current colours on the strip instead of going dark
-            {
-                for (di, dev) in cfg.devices.iter().enumerate() {
-                    if !dev.enabled {
-                        continue;
-                    }
-                    let key = (dev.host.clone(), dev.protocol);
-                    let stale = self.sender_keys.get(&dev.id).map(|k| k != &key).unwrap_or(true);
-                    if stale {
-                        self.senders
-                            .insert(dev.id.clone(), wled::Sender::new(&dev.host, dev.protocol));
-                        self.sender_keys.insert(dev.id.clone(), key);
-                    }
-                    if let Some(last) = self.last.get(di).cloned() {
-                        if let Some(sender) = self.senders.get_mut(&dev.id) {
-                            sender.send(&last);
-                        }
-                    }
+            // (WLED would fall back to its own effect after a timeout)
+            for (di, dev) in cfg.devices.iter().enumerate() {
+                if !dev.enabled || !self.due(di, dev, cfg.settings.target_fps) {
+                    continue;
                 }
-                self.sent_frames += 1;
+                if let Some(last) = self.last.get(di).cloned() {
+                    self.send(di, dev, &last);
+                }
             }
+            self.update_fps();
             return;
         }
 
         if let Some(f) = frame {
-            sampler::sample(&self.plan, &f.data, s_spatial, &mut raw);
+            if self.sampled_seq != Some(f.seq) {
+                self.sampled_seq = Some(f.seq);
+                self.sample(f, cfg);
+            }
         }
-        self.last_sample_us = t0.elapsed().as_micros();
 
         let s = &cfg.settings;
         let tau = (s.smoothing_ms / 1000.0).max(0.0);
@@ -154,78 +241,68 @@ impl Engine {
         } else {
             (1.0 - (-dt.max(0.0) / tau).exp()).clamp(0.0, 1.0)
         };
-        if !raw.is_empty() && self.smoothing.len() != raw.len() {
-            self.smoothing = raw.clone();
-        }
+        // slew limit: changes per second are capped, so a single noisy frame
+        // cannot make an LED jump
+        let max_step = if s.slew > 0.0 {
+            s.slew * dt.max(0.001)
+        } else {
+            f32::INFINITY
+        };
+        let gain_global = s.brightness;
 
-
+        // enabled devices are planned in order; map config index -> plan index
+        let mut plan_idx = 0usize;
         for (di, dev) in cfg.devices.iter().enumerate() {
             if !dev.enabled {
                 continue;
             }
-            let Some(plan_dev) = self.plan.devices.get(di) else {
+            let pi = plan_idx;
+            plan_idx += 1;
+            let Some(plan_dev) = self.plan.devices.get(pi) else {
                 continue;
             };
             let n = dev.led_count as usize;
-            let mut sm = self.smoothing.get(di).cloned().unwrap_or_default();
-            if sm.len() != n {
-                sm = vec![[0.0, 0.0, 0.0]; n];
+            if self.smoothing.len() <= di {
+                self.smoothing.resize(di + 1, Vec::new());
             }
-            if self.history.len() <= di {
-                self.history.resize(di + 1, Vec::new());
+            let first_fill = self.smoothing[di].len() != n;
+            if first_fill {
+                self.smoothing[di] = vec![[0.0; 3]; n];
             }
-            if self.history[di].len() != n {
-                self.history[di] = vec![[[0.0; 3]; 3]; n];
-            }
+            let raw_dev = self.raw.get(pi);
             let mut out = vec![[0u8; 3]; n];
-            for led in 0..n {
-                let mut c = raw
-                    .get(di)
+            for (led, px_out) in out.iter_mut().enumerate() {
+                let g = plan_dev.gains.get(led).copied().unwrap_or(0.0);
+                let c0 = raw_dev
                     .and_then(|d| d.get(led))
                     .copied()
-                    .unwrap_or([0.0, 0.0, 0.0]);
-                c[0] *= plan_dev.gains.get(led).copied().unwrap_or(0.0);
-                c[1] *= plan_dev.gains.get(led).copied().unwrap_or(0.0);
-                c[2] *= plan_dev.gains.get(led).copied().unwrap_or(0.0);
-                if alpha >= 1.0 {
-                    sm[led] = c;
+                    .unwrap_or([0.0; 3]);
+                let c = [c0[0] * g, c0[1] * g, c0[2] * g];
+                let sm = &mut self.smoothing[di][led];
+                if alpha >= 1.0 || first_fill {
+                    *sm = c;
                 } else {
-                    // slew limit: changes per second are capped, so single noisy
-                    // frames cannot make an LED jump
-                    let max_step = if s.slew > 0.0 {
-                        s.slew * dt.max(0.001)
-                    } else {
-                        f32::INFINITY
-                    };
                     for k in 0..3 {
-                        let diff = (c[k] - sm[led][k]) * alpha;
-                        let step = if s.slew > 0.0 {
-                            diff.clamp(-max_step, max_step)
-                        } else {
-                            diff
-                        };
+                        let diff = (c[k] - sm[k]) * alpha;
+                        let step = diff.clamp(-max_step, max_step);
+                        // dead band: tiny steps far from the target are noise
                         if step.abs() > 0.01 || diff.abs() < 0.6 {
-                            sm[led][k] += step;
+                            sm[k] += step;
                         }
                     }
                 }
-                let mut v = sm[led];
-                // global grade
+                let mut v = *sm;
                 if s.gamma != 1.0 {
-                    for k in 0..3 {
-                        v[k] = 255.0 * (v[k] / 255.0).clamp(0.0, 1.0).powf(s.gamma);
+                    for x in v.iter_mut() {
+                        *x = 255.0 * (*x / 255.0).clamp(0.0, 1.0).powf(s.gamma);
                     }
                 }
                 if s.saturation != 1.0 {
-                    let (hh, _, vv) = rgb_to_hsv([
-                        v[0] / 255.0,
-                        v[1] / 255.0,
-                        v[2] / 255.0,
-                    ]);
-                    let g = hsv_to_rgb(hh, s.saturation.clamp(0.0, 2.0), vv);
+                    let (hh, ss, vv) = rgb_to_hsv([v[0] / 255.0, v[1] / 255.0, v[2] / 255.0]);
+                    let g = hsv_to_rgb(hh, (ss * s.saturation).clamp(0.0, 1.0), vv);
                     v = [g[0] * 255.0, g[1] * 255.0, g[2] * 255.0];
                 }
-                let gain = dev.brightness * s.brightness;
+                let gain = dev.brightness * gain_global;
                 let mut px = [
                     (v[0] * gain).clamp(0.0, 255.0) as u8,
                     (v[1] * gain).clamp(0.0, 255.0) as u8,
@@ -234,7 +311,7 @@ impl Engine {
                 if dev.bgr {
                     px.swap(0, 2);
                 }
-                out[led] = px;
+                *px_out = px;
             }
             if dev.reverse {
                 out.reverse();
@@ -242,118 +319,140 @@ impl Engine {
             if self.last.len() <= di {
                 self.last.resize(di + 1, Vec::new());
             }
-            if self.stats_on {
-                if let Some(prev) = self.last.get(di) {
-                    if prev.len() == out.len() {
-                        let mut sum = 0.0f64;
-                        if self.stat_led.len() != out.len() {
-                            self.stat_led = vec![0.0; out.len()];
-                        }
-                        for (i, (a, b)) in prev.iter().zip(out.iter()).enumerate() {
-                            let mut d = 0.0f64;
-                            for k in 0..3 {
-                                d += (a[k] as f64 - b[k] as f64).abs();
-                            }
-                            sum += d;
-                            self.stat_led[i] += d / 3.0;
-                        }
-                        self.stat_led_n += 1;
-                        self.stat_sum += sum / (out.len().max(1) * 3) as f64;
-                        self.stat_n += 1;
-                    }
-                }
-                if self.stat_t.elapsed().as_secs_f32() >= 2.0 {
-                    let f = (self.stat_sum / self.stat_n.max(1) as f64) as f32;
-                    self.flicker = f;
-                    let mut worst: Vec<(usize, f64)> = self
-                        .stat_led
+            if let Some(st) = self.stats.as_mut() {
+                if let Some(prev) = self.last.get(di).filter(|p| p.len() == out.len()) {
+                    let d: f64 = prev
                         .iter()
-                        .enumerate()
-                        .map(|(i, v)| (i, v / self.stat_led_n.max(1) as f64))
-                        .collect();
-                    worst.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                    worst.truncate(6);
-                    let finfo = frame
-                        .map(|fr| {
-                            let data = &fr.data;
-                            let mut sum: u64 = 0;
-                            let mut n: u64 = 0;
-                            let mut i = 0;
-                            while i + 2 < data.len() {
-                                sum += (data[i] as u64 + data[i + 1] as u64 + data[i + 2] as u64) / 3;
-                                n += 1;
-                                i += 997;
-                            }
-                            format!(
-                                "frame {}x{} seq {} mean {:.1}",
-                                fr.w,
-                                fr.h,
-                                fr.seq,
-                                sum as f64 / n.max(1) as f64
-                            )
+                        .zip(&out)
+                        .map(|(a, b)| {
+                            (0..3)
+                                .map(|k| (a[k] as f64 - b[k] as f64).abs())
+                                .sum::<f64>()
                         })
-                        .unwrap_or_else(|| "frame NONE".to_string());
-                    eprintln!(
-                        "dt {:.1} ms  flicker {:.2}/frame  out {:.0} fps  sample {} µs  devices {} raw {}  {}  worst {:?}",
-                        dt * 1000.0,
-                        f,
-                        self.send_fps,
-                        self.last_sample_us,
-                        self.plan.devices.len(),
-                        raw.len(),
-                        finfo,
-                        worst
-                            .iter()
-                            .map(|(i, v)| format!("#{}:{:.1}", i, v))
-                            .collect::<Vec<_>>()
-                    );
-                    self.stat_sum = 0.0;
-                    self.stat_n = 0;
-                    self.stat_led.iter_mut().for_each(|v| *v = 0.0);
-                    self.stat_led_n = 0;
-                    self.stat_t = Instant::now();
+                        .sum();
+                    st.sum += d / (out.len().max(1) * 3) as f64;
+                    st.n += 1;
                 }
             }
-            self.last[di] = out.clone();
-            if self.smoothing.len() <= di {
-                self.smoothing.resize(di + 1, Vec::new());
+            if self.due(di, dev, s.target_fps) {
+                self.send(di, dev, &out);
             }
-            self.smoothing[di] = sm;
-
-            if self.last_sent.len() <= di {
-                self.last_sent.resize(di + 1, Instant::now() - std::time::Duration::from_secs(1));
-            }
-            let interval = if dev.max_fps > 0 {
-                1.0 / dev.max_fps as f32
-            } else {
-                1.0 / s.target_fps.max(1) as f32
-            };
-            let due = self.last_sent[di].elapsed().as_secs_f32() >= interval - 0.001;
-            if due {
-                self.last_sent[di] = Instant::now();
-                let key = (dev.host.clone(), dev.protocol);
-                let stale = self
-                    .sender_keys
-                    .get(&dev.id)
-                    .map(|k| k != &key)
-                    .unwrap_or(true);
-                if stale {
-                    self.senders
-                        .insert(dev.id.clone(), wled::Sender::new(&dev.host, dev.protocol));
-                    self.sender_keys.insert(dev.id.clone(), key);
-                }
-                if let Some(sender) = self.senders.get_mut(&dev.id) {
-                    sender.send(&out);
-                }
-                self.sent_frames += 1;
-            }
+            self.last[di] = out;
         }
 
-        let (start, count) = self.fps_window;
-        let el = start.elapsed().as_secs_f32();
+        if let Some(st) = self.stats.as_mut() {
+            if st.t.elapsed().as_secs_f32() >= 2.0 {
+                eprintln!(
+                    "dt {:.1} ms  change {:.2}/frame  out {:.0} fps  sample {} µs  devices {}",
+                    dt * 1000.0,
+                    st.sum / st.n.max(1) as f64,
+                    self.send_fps,
+                    self.last_sample_us,
+                    self.plan.devices.len(),
+                );
+                st.sum = 0.0;
+                st.n = 0;
+                st.t = Instant::now();
+            }
+        }
+        self.update_fps();
+    }
+
+    fn update_fps(&mut self) {
+        let el = self.fps_window.0.elapsed().as_secs_f32();
         if el > 1.0 {
-            self.send_fps = (self.sent_frames - count) as f32 / el;
-            self.fps_window = (Instant::now(), self.sent_frames);
+            let prev = &self.fps_window.1;
+            let best = self
+                .sent
+                .iter()
+                .enumerate()
+                .map(|(i, n)| n - prev.get(i).copied().unwrap_or(0).min(*n))
+                .max()
+                .unwrap_or(0);
+            self.send_fps = best as f32 / el;
+            self.fps_window = (Instant::now(), self.sent.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{DeviceCfg, Zone, ZonePreset};
+    use std::sync::Arc;
+
+    fn setup(leds: u16) -> Config {
+        let mut cfg = Config::default();
+        // TEST-NET address, nothing listens there
+        cfg.devices.push(DeviceCfg::new("192.0.2.1", "t", leds));
+        cfg.zones.push(Zone::preset(
+            ZonePreset::Full,
+            "192.0.2.1".into(),
+            leds,
+            [0, 0, 0],
+        ));
+        cfg.settings.smoothing_ms = 0.0;
+        cfg
+    }
+
+    fn solid(w: u32, h: u32, rgb: [u8; 3], seq: u64) -> SharedFrame {
+        let mut data = Vec::with_capacity((w * h * 3) as usize);
+        for _ in 0..w * h {
+            data.extend_from_slice(&rgb);
+        }
+        SharedFrame {
+            w,
+            h,
+            data: Arc::new(data),
+            seq,
+        }
+    }
+
+    #[test]
+    fn passes_colour_through_without_smoothing() {
+        let cfg = setup(8);
+        let mut e = Engine::new(&cfg, 32, 18);
+        e.tick(&cfg, Some(&solid(32, 18, [200, 100, 50], 1)), 0.02);
+        assert_eq!(e.last[0][0], [200, 100, 50]);
+        assert_eq!(e.last[0].len(), 8);
+    }
+
+    #[test]
+    fn median_rejects_a_single_spike() {
+        let mut cfg = setup(4);
+        cfg.settings.smoothing_ms = 1.0; // enables the median, nearly no lag
+        cfg.settings.slew = 0.0;
+        let mut e = Engine::new(&cfg, 32, 18);
+        for seq in 1..=3 {
+            e.tick(&cfg, Some(&solid(32, 18, [10, 10, 10], seq)), 1.0);
+        }
+        e.tick(&cfg, Some(&solid(32, 18, [250, 250, 250], 4)), 1.0);
+        assert!(e.last[0][0][0] < 20, "spike leaked: {:?}", e.last[0][0]);
+    }
+
+    #[test]
+    fn bgr_and_reverse() {
+        let mut cfg = setup(2);
+        cfg.devices[0].bgr = true;
+        let mut e = Engine::new(&cfg, 32, 18);
+        e.tick(&cfg, Some(&solid(32, 18, [1, 2, 3], 1)), 0.02);
+        assert_eq!(e.last[0][0], [3, 2, 1]);
+    }
+
+    #[test]
+    fn saturation_zero_is_grey() {
+        let mut cfg = setup(1);
+        cfg.settings.saturation = 0.0;
+        let mut e = Engine::new(&cfg, 32, 18);
+        e.tick(&cfg, Some(&solid(32, 18, [200, 0, 0], 1)), 0.02);
+        let c = e.last[0][0];
+        assert_eq!(c[0], c[1]);
+        assert_eq!(c[1], c[2]);
+    }
+
+    #[test]
+    fn median3_works() {
+        assert_eq!(median3(1.0, 5.0, 3.0), 3.0);
+        assert_eq!(median3(9.0, 1.0, 1.0), 1.0);
     }
 }

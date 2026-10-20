@@ -1,1 +1,6 @@
 /target
+/build-flatpak
+/.flatpak-builder
+/dist
+packaging/flatpak/.flatpak-cargo-generator.py
+.DS_Store

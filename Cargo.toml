@@ -1,17 +1,97 @@
 [package]
-name = "ambilight"
+name = "wled-ambilight"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.90"
+description = "Lightweight ambilight for WLED: captures the screen, samples freely placed zones and streams the colours to WLED via DDP."
+authors = ["Patrick Weppelmann <patrick.weppelmann@neoimpulse.de>"]
+license = "GPL-3.0-only"
+repository = "https://github.com/Smotherer007/wledambilight"
+homepage = "https://github.com/Smotherer007/wledambilight"
+readme = "README.md"
+keywords = ["wled", "ambilight", "led", "ddp", "screen-capture"]
+categories = ["multimedia", "gui"]
+publish = false
+
+[[bin]]
+name = "wled-ambilight"
+path = "src/main.rs"
 
 [dependencies]
-ashpd = { version = "0.13", features = ["screencast"] }
-libc = "0.2"
 anyhow = "1"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
-zbus = { version = "5", default-features = false, features = ["blocking-api", "tokio"] }
 eframe = "0.32"
 egui = "0.32"
-serde = "1.0.229"
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-ureq = "3.4.2"
+mdns-sd = "0.21"
+dirs = "6"
+sys-locale = "0.3"
+
+# Linux: xdg-desktop-portal + PipeWire (via GStreamer) and a StatusNotifierItem tray
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13", features = ["screencast"] }
+libc = "0.2"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
 ksni = { version = "0.3.6", features = ["blocking"] }
+
+# Windows: Windows Graphics Capture + native tray
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-capture = "2"
+tray-icon = "0.26"
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+# macOS: ScreenCaptureKit + native menu bar item
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = "11"
+tray-icon = "0.26"
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# ---------------------------------------------------------------- packaging
+
+[package.metadata.deb]
+name = "wled-ambilight"
+maintainer = "Patrick Weppelmann <patrick.weppelmann@neoimpulse.de>"
+copyright = "2026 Patrick Weppelmann"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+Captures the screen through the XDG desktop portal (PipeWire), samples freely \
+placed zones and streams the colours to WLED devices via DDP or DRGB."""
+depends = "$auto, gstreamer1.0-tools, gstreamer1.0-pipewire, gstreamer1.0-plugins-base, xdg-desktop-portal"
+section = "video"
+priority = "optional"
+assets = [
+    ["target/release/wled-ambilight", "usr/bin/", "755"],
+    ["packaging/linux/io.github.smotherer007.WledAmbilight.desktop", "usr/share/applications/", "644"],
+    ["packaging/linux/io.github.smotherer007.WledAmbilight.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["assets/icon.svg", "usr/share/icons/hicolor/scalable/apps/io.github.smotherer007.WledAmbilight.svg", "644"],
+    ["assets/icons/icon-256.png", "usr/share/icons/hicolor/256x256/apps/io.github.smotherer007.WledAmbilight.png", "644"],
+    ["README.md", "usr/share/doc/wled-ambilight/README.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "wled-ambilight"
+license = "GPL-3.0-only"
+summary = "Ambilight for WLED (screen capture to DDP)"
+assets = [
+    { source = "target/release/wled-ambilight", dest = "/usr/bin/wled-ambilight", mode = "755" },
+    { source = "packaging/linux/io.github.smotherer007.WledAmbilight.desktop", dest = "/usr/share/applications/io.github.smotherer007.WledAmbilight.desktop", mode = "644" },
+    { source = "packaging/linux/io.github.smotherer007.WledAmbilight.metainfo.xml", dest = "/usr/share/metainfo/io.github.smotherer007.WledAmbilight.metainfo.xml", mode = "644" },
+    { source = "assets/icon.svg", dest = "/usr/share/icons/hicolor/scalable/apps/io.github.smotherer007.WledAmbilight.svg", mode = "644" },
+    { source = "assets/icons/icon-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/io.github.smotherer007.WledAmbilight.png", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/wled-ambilight/LICENSE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+gstreamer1-plugins-base = "*"
+gstreamer1-plugins-good = "*"
+pipewire-gstreamer = "*"
+xdg-desktop-portal = "*"

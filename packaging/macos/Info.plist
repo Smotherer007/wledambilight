@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleLocalizations</key>
+  <array>
+    <string>en</string>
+    <string>de</string>
+  </array>
+  <key>CFBundleDisplayName</key>
+  <string>WLED Ambilight</string>
+  <key>CFBundleName</key>
+  <string>WLED Ambilight</string>
+  <key>CFBundleExecutable</key>
+  <string>wled-ambilight</string>
+  <key>CFBundleIdentifier</key>
+  <string>io.github.smotherer007.WledAmbilight</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>@VERSION@</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.utilities</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSHumanReadableCopyright</key>
+  <string>© 2026 Patrick Weppelmann · GPL-3.0</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>WLED Ambilight finds WLED devices on your network and sends them the screen colours.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_wled._tcp</string>
+  </array>
+</dict>
+</plist>

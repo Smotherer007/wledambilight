@@ -1,0 +1,54 @@
+# Flatpak manifest for WLED Ambilight.
+#
+# Local build (from the repository root):
+#   bash packaging/flatpak/update-cargo-sources.sh
+#   flatpak-builder --user --install --force-clean build-flatpak \
+#       packaging/flatpak/io.github.smotherer007.WledAmbilight.yml
+#
+# For Flathub, replace the `dir` source below with the git tag of a release
+# (see packaging/flatpak/README.md).
+id: io.github.smotherer007.WledAmbilight
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: wled-ambilight
+
+finish-args:
+  # window (Wayland first, X11 as fallback) + GPU
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # UDP/HTTP to the WLED devices, mDNS discovery
+  - --share=network
+  # tray icon
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # Screen capture goes through the ScreenCast portal (no extra permission).
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/wled-ambilight/cargo
+    CARGO_NET_OFFLINE: 'true'
+
+modules:
+  - name: wled-ambilight
+    buildsystem: simple
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - cargo --offline build --release --locked --verbose
+      - install -Dm755 target/release/wled-ambilight ${FLATPAK_DEST}/bin/wled-ambilight
+      - install -Dm644 packaging/linux/${FLATPAK_ID}.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      - install -Dm644 packaging/linux/${FLATPAK_ID}.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
+      - install -Dm644 assets/icon.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
+      - for s in 16 24 32 48 64 128 256 512; do install -Dm644 assets/icons/icon-$s.png ${FLATPAK_DEST}/share/icons/hicolor/${s}x${s}/apps/${FLATPAK_ID}.png; done
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - build-flatpak
+          - .flatpak-builder
+      - cargo-sources.json

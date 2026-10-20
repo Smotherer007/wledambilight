@@ -1,0 +1,302 @@
+name: Release
+
+# How releases happen
+#
+# 1. Commit to `main` with Conventional Commit messages (feat:, fix:, ...).
+# 2. release-please keeps a "chore(main): release x.y.z" pull request up to date:
+#    version bump in Cargo.toml/Cargo.lock/metainfo + CHANGELOG.md.
+# 3. Merging that pull request creates the tag vX.Y.Z and the GitHub release,
+#    and this workflow builds and attaches all packages to it.
+#
+# Pushing a tag v* by hand, or running the workflow manually with an existing
+# tag, (re)builds the packages for that tag as well.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build, e.g. v0.2.0
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-please:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      created: ${{ steps.rp.outputs.release_created }}
+      tag: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  prepare:
+    needs: release-please
+    if: >-
+      always() && (
+        needs.release-please.outputs.created == 'true' ||
+        startsWith(github.ref, 'refs/tags/v') ||
+        github.event_name == 'workflow_dispatch'
+      )
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.t.outputs.tag }}
+      version: ${{ steps.t.outputs.version }}
+    steps:
+      - id: t
+        env:
+          RP_TAG: ${{ needs.release-please.outputs.tag }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "$RP_TAG" ]; then TAG="$RP_TAG"
+          elif [ -n "$INPUT_TAG" ]; then TAG="$INPUT_TAG"
+          else TAG="$GITHUB_REF_NAME"; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: Make sure the GitHub release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.t.outputs.tag }}
+        run: |
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag
+
+  # ---------------------------------------------------------------- Linux
+  linux:
+    needs: prepare
+    name: Linux (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04 keeps the glibc requirement low (runs on most distros).
+          - { arch: x86_64, deb: amd64, os: ubuntu-22.04 }
+          # ARM64 (e.g. Raspberry Pi 5): GitHub's ARM runners are free for
+          # public repositories only. Uncomment once the repository is public.
+          # - { arch: aarch64, deb: arm64, os: ubuntu-22.04-arm }
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm
+      - name: Stamp release date into the metainfo
+        run: sed -i -E "s/(<release version=\"$VERSION\" date=\")[0-9-]+/\1$(date -u +%F)/" packaging/linux/*.metainfo.xml
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name="wled-ambilight-$VERSION-linux-${{ matrix.arch }}"
+          root="dist/$name"
+          install -Dm755 target/release/wled-ambilight "$root/bin/wled-ambilight"
+          install -Dm644 packaging/linux/*.desktop -t "$root/share/applications/"
+          install -Dm644 packaging/linux/*.metainfo.xml -t "$root/share/metainfo/"
+          install -Dm644 assets/icon.svg "$root/share/icons/hicolor/scalable/apps/io.github.smotherer007.WledAmbilight.svg"
+          for s in 16 32 48 64 128 256 512; do
+            install -Dm644 "assets/icons/icon-$s.png" "$root/share/icons/hicolor/${s}x${s}/apps/io.github.smotherer007.WledAmbilight.png"
+          done
+          install -Dm644 LICENSE README.md -t "$root/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "$root"
+
+          cargo deb --no-build -o "dist/wled-ambilight_${VERSION}_${{ matrix.deb }}.deb"
+          cargo generate-rpm -o "dist/wled-ambilight-${VERSION}.${{ matrix.arch }}.rpm"
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+
+  flatpak:
+    needs: prepare
+    name: Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - name: Offline crate list
+        run: |
+          dnf install -y python3-aiohttp python3-tomlkit || pip3 install aiohttp tomlkit
+          bash packaging/flatpak/update-cargo-sources.sh
+      - name: Stamp release date into the metainfo
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: sed -i -E "s/(<release version=\"$VERSION\" date=\")[0-9-]+/\1$(date -u +%F)/" packaging/linux/*.metainfo.xml
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: wled-ambilight-${{ needs.prepare.outputs.version }}-linux-x86_64.flatpak
+          manifest-path: packaging/flatpak/io.github.smotherer007.WledAmbilight.yml
+          cache-key: flatpak-builder-${{ github.sha }}
+          upload-artifact: true
+
+  # ---------------------------------------------------------------- Windows
+  windows:
+    needs: prepare
+    name: Windows
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $name = "wled-ambilight-$env:VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Force "dist\$name" | Out-Null
+          Copy-Item target\release\wled-ambilight.exe, LICENSE, README.md "dist\$name\"
+          Compress-Archive -Path "dist\$name\*" -DestinationPath "dist\$name.zip"
+          Remove-Item -Recurse "dist\$name"
+      - name: Installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DAppVersion=$env:VERSION" "/DSourceDir=$PWD\target\release" packaging\windows\installer.iss
+          Move-Item target\release\*-setup.exe dist\
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  # ---------------------------------------------------------------- macOS
+  macos:
+    needs: prepare
+    name: macOS (universal)
+    runs-on: macos-latest
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      # Optional code signing / notarisation. Without these secrets the app is
+      # ad-hoc signed (users confirm it once via System Settings → Privacy).
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (arm64 + x86_64)
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+      - name: App bundle
+        run: |
+          set -euo pipefail
+          app="dist/WLED Ambilight.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/wled-ambilight" \
+            target/aarch64-apple-darwin/release/wled-ambilight \
+            target/x86_64-apple-darwin/release/wled-ambilight
+          sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          iconset="$RUNNER_TEMP/AppIcon.iconset"
+          mkdir -p "$iconset"
+          for s in 16 32 128 256 512; do
+            sips -z $s $s assets/icons/icon-1024.png --out "$iconset/icon_${s}x${s}.png" >/dev/null
+            d=$((s * 2))
+            sips -z $d $d assets/icons/icon-1024.png --out "$iconset/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
+          cp LICENSE "$app/Contents/Resources/"
+      - name: Sign
+        run: |
+          set -euo pipefail
+          app="dist/WLED Ambilight.app"
+          if [ -n "$MACOS_CERTIFICATE" ]; then
+            kc="$RUNNER_TEMP/build.keychain"
+            echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security create-keychain -p ci "$kc"
+            security set-keychain-settings -lut 3600 "$kc"
+            security unlock-keychain -p ci "$kc"
+            security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -s -k ci "$kc"
+            security list-keychains -d user -s "$kc"
+            codesign --force --deep --options runtime --timestamp -s "$MACOS_SIGNING_IDENTITY" "$app"
+          else
+            codesign --force --deep -s - "$app"
+          fi
+          codesign --verify --verbose "$app"
+      - name: Disk image
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/dmg"
+          mkdir -p "$stage"
+          cp -R "dist/WLED Ambilight.app" "$stage/"
+          ln -s /Applications "$stage/Applications"
+          dmg="dist/wled-ambilight-$VERSION-macos-universal.dmg"
+          hdiutil create -volname "WLED Ambilight" -srcfolder "$stage" -ov -format UDZO "$dmg"
+          if [ -n "$MACOS_CERTIFICATE" ] && [ -n "$APPLE_ID" ]; then
+            codesign --timestamp -s "$MACOS_SIGNING_IDENTITY" "$dmg"
+            xcrun notarytool submit "$dmg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD" --wait
+            xcrun stapler staple "$dmg"
+          fi
+          rm -rf "dist/WLED Ambilight.app"
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+
+  # ---------------------------------------------------------------- upload
+  publish:
+    needs: [prepare, linux, flatpak, windows, macos]
+    # upload whatever was built, even if one platform failed
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          ls -la
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release upload "$TAG" dist/* --clobber -R "$GITHUB_REPOSITORY"
