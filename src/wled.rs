@@ -203,6 +203,11 @@ pub struct DdpSender {
 impl DdpSender {
     pub fn new(host: &str) -> Option<Self> {
         let addr = (host, 4048u16).to_socket_addrs().ok()?.next()?;
+        Self::connect_to(addr)
+    }
+
+    /// Sender for an explicit address (the tests use a local port).
+    fn connect_to(addr: SocketAddr) -> Option<Self> {
         let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
         sock.connect(addr).ok()?;
         sock.set_nonblocking(true).ok()?;
@@ -309,9 +314,9 @@ fn ddp_packets(colors: &[[u8; 3]]) -> Vec<Vec<u8>> {
     let port = sock.local_addr().unwrap().port();
     sock.set_read_timeout(Some(Duration::from_millis(500)))
         .unwrap();
-    let mut tx = DdpSender::new("127.0.0.1").unwrap();
-    // DdpSender targets port 4048; point it at our test socket instead
-    tx.sock.connect(("127.0.0.1", port)).unwrap();
+    // connect straight to the test port: macOS refuses to re-connect a
+    // connected UDP socket (EISCONN), Linux allows it
+    let mut tx = DdpSender::connect_to(SocketAddr::from(([127, 0, 0, 1], port))).unwrap();
     tx.send(colors);
     let mut out = Vec::new();
     let mut buf = [0u8; 2048];
