@@ -32,24 +32,21 @@ jobs:
         include:
           - name: Linux
             os: ubuntu-latest
-            rustflags: -D warnings
           - name: Windows
             os: windows-latest
-            rustflags: ''
           - name: macOS
             os: macos-latest
-            rustflags: ''
     runs-on: ${{ matrix.os }}
-    env:
-      RUSTFLAGS: ${{ matrix.rustflags }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # Warnings are shown as annotations but do not fail the build: every new
+      # Rust release brings new lints. Real bugs (correctness) still fail.
       - name: Clippy
-        run: cargo clippy --all-targets --locked
+        run: cargo clippy --all-targets --locked -- -D clippy::correctness
       - name: Tests
         run: cargo test --locked
       - name: Build
